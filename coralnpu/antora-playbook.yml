@@ -1,0 +1,22 @@
+site:
+  title: Coral NPU Full Stack Docs
+  start_page: coral-npu-stack:ROOT:index.adoc
+
+content:
+  sources:
+    - url: .
+      start_path: docs
+      branches: HEAD
+      worktrees: true
+
+ui:
+  bundle:
+    url: https://gitlab.com/antora/antora-ui-default/-/jobs/artifacts/HEAD/raw/build/ui-bundle.zip?job=bundle-stable
+    snapshot: true
+
+asciidoc:
+  extensions:
+    - ./lib/mermaid-extension.js
+
+output:
+  dir: ./build/site

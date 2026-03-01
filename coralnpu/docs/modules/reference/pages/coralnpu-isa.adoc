@@ -1,0 +1,237 @@
+= Coral NPU ISA Reference
+:description: Instruction Set Architecture specification for the Google Coral NPU — a RISC-V rv32imf core with custom SIMD vector extensions.
+
+== ISA String
+
+----
+rv32imf_zve32x_zicsr_zifencei_zbb
+----
+
+== Extensions
+
+[cols="1,1,3"]
+|===
+|Extension |Version |Description
+
+|`rv32i`
+|2.1
+|Base 32-bit integer: ALU, load/store, branches, jumps
+
+|`m`
+|2.0
+|Integer multiply/divide: `mul`, `mulh`, `div`, `rem`
+
+|`f`
+|2.2
+|Single-precision float: `fadd.s`, `fmul.s`, `fdiv.s`, `fsqrt.s`, `fmadd.s`
+
+|`zve32x`
+|1.0
+|128-bit SIMD vector: 4×f32, 8×i16, 16×i8 per register
+
+|`zicsr`
+|2.0
+|Control/status registers: `csrrw`, `csrrs`, `csrrc`
+
+|`zifencei`
+|2.0
+|Instruction-fetch fence: `fence.i`
+
+|`zbb`
+|1.0
+|Bit manipulation: `clz`, `ctz`, `cpop`, `min`, `max`, `orc.b`, `rev8`, `rol`, `ror`
+|===
+
+== ABI
+
+[cols="1,1"]
+|===
+|Parameter |Value
+
+|ABI
+|`ilp32`
+
+|Code model
+|`medany`
+
+|Endianness
+|Little-endian
+
+|Pointer size
+|32-bit
+
+|Integer size
+|32-bit
+
+|Long size
+|32-bit
+
+|Float
+|Hardware single-precision (32-bit)
+
+|Double
+|Not supported (no `d` extension)
+|===
+
+== Register File
+
+=== Scalar Registers
+
+[cols="1,1,2"]
+|===
+|Register |ABI Name |Usage
+
+|x0
+|zero
+|Hardwired zero
+
+|x1
+|ra
+|Return address
+
+|x2
+|sp
+|Stack pointer
+
+|x3
+|gp
+|Global pointer
+
+|x4
+|tp
+|Thread pointer (unused — no OS)
+
+|x5-x7
+|t0-t2
+|Temporaries
+
+|x8
+|s0/fp
+|Saved register / frame pointer
+
+|x9
+|s1
+|Saved register
+
+|x10-x11
+|a0-a1
+|Function arguments / return values
+
+|x12-x17
+|a2-a7
+|Function arguments
+
+|x18-x27
+|s2-s11
+|Saved registers
+
+|x28-x31
+|t3-t6
+|Temporaries
+|===
+
+=== Vector Registers
+
+[cols="1,1,2"]
+|===
+|Register |Width |Data Types
+
+|v0..v63
+|256-bit
+|8×i32, 16×i16, 32×i8, 8×f32
+
+|acc[8][8]
+|8×8×32-bit
+|Accumulator array for outer-product MAC
+|===
+
+NOTE: The C extension encoding space is reclaimed to provide 6-bit vector register indices (64 registers) instead of the standard 5-bit (32 registers).
+
+== Pipeline
+
+4-stage in-order scalar pipeline:
+
+----
+Fetch → Decode → Execute → Writeback
+----
+
+- **Fetch**: Static branch prediction (backward=taken, forward=not-taken). 1-cycle misprediction penalty.
+- **Decode**: 4-way dispatch — scalar ops to execute unit, vector ops to command FIFO.
+- **Execute**: ALU, FPU, load/store.
+- **Writeback**: Result commit.
+
+The vector backend is decoupled via a FIFO and executes asynchronously.
+
+== Stripmining
+
+A single vector instruction in dispatch expands to 4 issue events:
+
+----
+vadd v0 → vadd v0 : vadd v1 : vadd v2 : vadd v3
+----
+
+This provides 4× throughput per dispatch slot.
+
+== MAC Operation
+
+Outer-product multiply-accumulate:
+
+- 8 parallel VDOT units
+- Each VDOT: 4× int8 multiply → int32 accumulate
+- Total: 256 MACs/cycle
+- Accumulator: 8×8 × 32-bit result matrix
+
+== CSR Registers
+
+[cols="1,1,2"]
+|===
+|CSR |Address |Purpose
+
+|`mstatus`
+|`0x300`
+|Machine status (FP/Vector enable bits)
+
+|`mcycle`
+|`0xB00`
+|Cycle counter (lower 32 bits)
+
+|`mcycleh`
+|`0xB80`
+|Cycle counter (upper 32 bits)
+
+|`minstret`
+|`0xB02`
+|Instructions retired counter
+
+|`mtvec`
+|`0x305`
+|Trap vector base address
+
+|Custom
+|Vendor-specific
+|Debug, performance counters
+|===
+
+== Compiler Flags
+
+[source,bash]
+----
+# Clang cross-compilation flags
+-target riscv32-unknown-elf
+-march=rv32imf_zve32x_zicsr_zifencei_zbb
+-mabi=ilp32
+-mcmodel=medany
+-O3
+-nostdlib
+-fno-exceptions
+-fno-rtti
+----
+
+== Unsupported Features
+
+- No `d` extension (no double-precision float)
+- No `a` extension (no atomic instructions — single-threaded)
+- No `c` extension (encoding space reclaimed for vector registers)
+- No interrupts in run-to-completion mode
+- No virtual memory (bare-metal, physical addresses only)
+- No f16 hardware (f16 values must be promoted to f32 in software)

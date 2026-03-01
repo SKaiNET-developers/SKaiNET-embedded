@@ -1,0 +1,271 @@
+= DSL to NPU Pipeline
+:description: Deep technical explanation of how a model defined in SKaiNET's Kotlin DSL is transformed through StableHLO MLIR, transpiled to C, cross-compiled to RISC-V, and executed on the Coral NPU simulator.
+
+== The Full Compilation Pipeline
+
+This page traces a single model — RGB-to-grayscale conversion — through every transformation stage, showing the exact representation at each step.
+
+[mermaid]
+....
+flowchart TB
+    subgraph S1 ["Stage 1: Kotlin DSL"]
+        K["rgb2GrayScaleMatMul()"]
+    end
+
+    subgraph S2 ["Stage 2: Computation Graph"]
+        T["Tape-recorded ops:<br/>constant, conv2d, return"]
+    end
+
+    subgraph S3 ["Stage 3: StableHLO MLIR"]
+        M["func.func @rgb2grayscale<br/>stablehlo.constant<br/>stablehlo.convolution<br/>return"]
+    end
+
+    subgraph S4 ["Stage 4: IR Dataclasses"]
+        IR["Module(<br/>  FuncDef(name='rgb2grayscale',<br/>    body=[ConstantOp, ConvolutionOp, ReturnOp]<br/>  )<br/>)"]
+    end
+
+    subgraph S5 ["Stage 5: C Source"]
+        C["float input_0[48];<br/>float output_0[16];<br/>static const float v0[3] = {...};<br/>int main() { for loops }"]
+    end
+
+    subgraph S6 ["Stage 6: RISC-V ELF"]
+        E[".text in ITCM (8KB)<br/>.data in DTCM (32KB)<br/>symbols: input_0, output_0"]
+    end
+
+    subgraph S7 ["Stage 7: Simulator Output"]
+        O["float32[16] grayscale pixels"]
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+
+    style S1 fill:#e1f5fe
+    style S2 fill:#e1f5fe
+    style S3 fill:#f3e5f5
+    style S4 fill:#fff3e0
+    style S5 fill:#fff3e0
+    style S6 fill:#e8f5e9
+    style S7 fill:#e8f5e9
+....
+
+== Stage 1: Kotlin DSL
+
+The model is defined as a pure function on tensors:
+
+[source,kotlin]
+----
+fun Tensor<Float32, Shape4D>.rgb2GrayScaleMatMul(): Tensor<Float32, Shape4D> {
+    val grayWeights = constant(
+        floatArrayOf(0.299f, 0.587f, 0.114f),
+        Shape1D(3)
+    ).reshape(Shape2D(3, 1))
+
+    val reshaped = this.transpose(intArrayOf(0, 2, 3, 1))  // NCHW → NHWC
+    val gray = reshaped.matmul(grayWeights)                 // [B,H,W,3] × [3,1]
+    return gray.transpose(intArrayOf(0, 3, 1, 2))           // NHWC → NCHW
+}
+----
+
+The Kotlin type system enforces tensor shapes at compile time. `Tensor<Float32, Shape4D>` carries both the element type (`Float32`) and the dimensionality (`Shape4D` = batch, channel, height, width) as type parameters.
+
+An alternative formulation uses 1x1 convolution instead of matmul — this is what the `--backend=hlo-export` path actually produces:
+
+[source,kotlin]
+----
+// Equivalent: 1x1 convolution with 3 input channels, 1 output channel
+// Kernel weights [C_OUT=1, C_IN=3, KH=1, KW=1] = [0.299, 0.587, 0.114]
+----
+
+== Stage 2: Tape Recording
+
+When the model function executes, SKaiNET's `skainet-compile-core` module records every operation onto a _tape_ — a linear trace of the computation. This is similar to PyTorch's autograd tape or JAX's tracing mechanism.
+
+[mermaid]
+....
+sequenceDiagram
+    participant DSL as Model Code
+    participant Tape as TapeRecorder
+    participant Graph as ComputeGraph
+
+    DSL->>Tape: constant([0.299, 0.587, 0.114])
+    Tape->>Tape: Record ConstantOp #1
+    DSL->>Tape: convolution(input, weights)
+    Tape->>Tape: Record ConvolutionOp #2
+    DSL->>Tape: return result
+    Tape->>Tape: Record ReturnOp #3
+    Tape->>Graph: Build DAG from tape
+    Graph->>Graph: Topological sort
+    Graph->>Graph: Shape inference
+....
+
+The tape records operations in execution order. The `skainet-compile-dag` module then converts this linear trace into a DAG (directed acyclic graph), resolving data dependencies and enabling optimization.
+
+== Stage 3: StableHLO MLIR Export
+
+The `StableHloConverter` in `skainet-compile-hlo` transforms the computation graph into StableHLO MLIR text. This is a direct mapping — each graph node becomes one or more StableHLO operations.
+
+For the grayscale model, the output is:
+
+[source,mlir]
+----
+module {
+  func.func @rgb2grayscale(%arg0: tensor<1x3x4x4xf32>) -> (tensor<1x1x4x4xf32>) {
+    // Luminance weights as a 1x1 convolution kernel
+    %v0 = stablehlo.constant dense<[[[[0.2989]], [[0.587]], [[0.114]]]]>
+        : tensor<1x3x1x1xf32>
+
+    // 1x1 convolution: 3 input channels → 1 output channel
+    %v1 = stablehlo.convolution(%arg0, %v0)
+        dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],
+        window = {stride = [1, 1], pad = [[0, 0], [0, 0]], rhs_dilate = [1, 1]}
+        {batch_group_count = 1 : i64, feature_group_count = 1 : i64}
+        : (tensor<1x3x4x4xf32>, tensor<1x3x1x1xf32>) -> tensor<1x1x4x4xf32>
+
+    return %v1 : tensor<1x1x4x4xf32>
+  }
+}
+----
+
+=== Key StableHLO Concepts
+
+`dim_numbers`:: Specifies the data layout convention. `[b, f, 0, 1]` means batch-first, then features (channels), then spatial dimensions. This is NCHW layout.
+
+`stablehlo.convolution`:: A high-level operation that computes the convolution without specifying _how_ — no loop nests, no tiling, no memory access patterns. The compiler (or transpiler) is responsible for lowering this to concrete code.
+
+`tensor<1x3x1x1xf32>`:: The kernel shape encodes a 1x1 convolution — spatial dimensions are both 1, with 3 input channels and 1 output channel (the outer dimension).
+
+== Stage 4: MLIR Parsing to IR Dataclasses
+
+The Python transpiler in `iree-tools/` parses the MLIR text using regex patterns and builds a typed IR:
+
+[source,python]
+----
+@dataclass
+class Module:
+    functions: list[FuncDef]
+
+@dataclass
+class FuncDef:
+    name: str                              # "rgb2grayscale"
+    args: list[tuple[str, TensorType]]     # [("%arg0", tensor<1x3x4x4xf32>)]
+    return_types: list[TensorType]         # [tensor<1x1x4x4xf32>]
+    body: list[Op]                         # [ConstantOp, ConvolutionOp, ReturnOp]
+----
+
+The parser handles:
+
+- `stablehlo.constant dense<...>` — extracts float values from arbitrarily nested brackets
+- `stablehlo.convolution(...)` — extracts operands, strides, padding, dilation, group counts
+- `stablehlo.add/multiply/subtract/divide` — element-wise binary operations
+- `stablehlo.convert` — type conversions (f16→f32 becomes a no-op alias)
+- `return` — maps return values to output arrays
+
+== Stage 5: C Code Generation
+
+The `codegen.py` module transforms the IR into C source following `coralnpu_v2_binary` conventions:
+
+[source,c]
+----
+// Generated from StableHLO MLIR function @rgb2grayscale
+// f16 promoted to f32 (Coral NPU has hardware f32, no f16)
+
+float input_0[48] __attribute__((section(".data")));   // 1×3×4×4 = 48 floats
+float output_0[16] __attribute__((section(".data")));   // 1×1×4×4 = 16 floats
+
+static const float v0[3] = {0.2989f, 0.587f, 0.114f};
+
+int main() {
+  // 1x1 convolution: 3 input channels -> 1 output channels
+  for (int i = 0; i < 16; i++) {
+    float sum = 0.0f;
+    for (int c = 0; c < 3; c++) {
+      sum += input_0[c * 16 + i] * v0[c];
+    }
+    output_0[i] = sum;
+  }
+  return 0;
+}
+----
+
+=== Critical C Conventions
+
+`+__attribute__((section(".data")))+`::
+Forces arrays into the `.data` section, which the linker script places in DTCM (Data Tightly-Coupled Memory at `0x00010000`). Without this attribute, the compiler might place them in `.bss` (zero-initialized) or `.rodata` (read-only), which have different memory mapping behavior.
+
+Global arrays as I/O::
+The simulator accesses input/output data by looking up ELF symbol addresses (`input_0`, `output_0`), writing input bytes to the input address, running the program, then reading output bytes from the output address. This is the NPU's I/O convention — no syscalls, no file I/O, just shared memory.
+
+`static const` for weights::
+Convolution weights are compile-time constants placed in `.rodata` (which lives in ITCM). They are read-only and never modified.
+
+1x1 convolution optimization::
+When the kernel is 1x1 with stride 1 and no padding, the codegen produces a simplified 2-loop nest instead of the general 7-loop convolution. This reduces code size (critical with 8 KB ITCM) and improves cache behavior.
+
+== Stage 6: Cross-Compilation to ELF
+
+The `bazel_builder.py` module writes the generated `.cc` and a `BUILD.bazel` file to `coralnpu/examples/generated/`, then invokes Bazel:
+
+[mermaid]
+....
+flowchart LR
+    CC[".cc source"] --> CLANG["Clang cross-compiler<br/>-march=rv32imf_zve32x...<br/>-O3 -nostdlib"]
+    CRT["coralnpu_start.S<br/>(BSS clear, FP/Vector init)"] --> CLANG
+    NEWLIB["newlib-nano<br/>(libc, libm)"] --> CLANG
+    LD["coralnpu_tcm.ld<br/>(ITCM/DTCM/EXTMEM)"] --> CLANG
+    CLANG --> ELF[".elf binary<br/>~8 KB"]
+....
+
+The CRT startup sequence (`coralnpu_start.S`) runs before `main()`:
+
+1. Set stack pointer and global pointer from linker symbols
+2. Zero out `.bss` section (uninitialized global variables)
+3. Run C++ static constructors (`.init_array`)
+4. Enable FP and Vector extensions in RISC-V `mstatus` CSR
+5. Write sentinel `0x0badd00d` to `_ret` symbol
+6. Call `main(0, 0)`
+7. After `main()` returns, store return value, execute `ebreak` to halt
+
+== Stage 7: Simulator Execution
+
+The MPACT behavioral simulator loads the ELF, writes input data to memory, runs the program, and reads output data:
+
+[source,python]
+----
+sim = CoralNPUV2Simulator()
+entry, symbols = sim.get_elf_entry_and_symbol(elf, ["input_0", "output_0"])
+sim.load_program(elf, entry)
+
+# Write test image (3 channels × 4×4 pixels = 48 floats)
+sim.write_memory(symbols["input_0"], test_image.astype(np.float32).view(np.uint8))
+
+sim.run()
+sim.wait()
+
+# Read grayscale output (1 channel × 4×4 pixels = 16 floats)
+result = sim.read_memory(symbols["output_0"], 64).view(np.float32)
+----
+
+The simulator provides cycle-accurate execution counts, enabling performance analysis without physical hardware.
+
+== What Gets Lost at Each Stage
+
+Understanding what information is _removed_ at each transformation is as important as understanding what is _produced_:
+
+[cols="1,2"]
+|===
+|Transition |Information Lost
+
+|Kotlin → StableHLO
+|Type-level shape constraints, Kotlin generics, multiplatform targets, module boundaries
+
+|StableHLO → IR Dataclasses
+|MLIR metadata, dim_numbers semantics (assumed NCHW), source location info
+
+|IR → C Source
+|SSA form, explicit data flow graph, tensor semantics (becomes flat arrays)
+
+|C → ELF
+|Variable names (become addresses), high-level loop structure (becomes branch instructions)
+
+|ELF → Simulator
+|Nothing — the simulator executes the exact machine code
+|===

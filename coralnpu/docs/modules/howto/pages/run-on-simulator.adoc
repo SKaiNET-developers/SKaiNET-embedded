@@ -1,0 +1,176 @@
+= How to Run on the MPACT Simulator
+:description: Execute a bare-metal RISC-V ELF binary on the MPACT behavioral simulator and read output data.
+
+== Prerequisites
+
+- A built `.elf` binary (see xref:howto:build-elf-for-npu.adoc[])
+- `uv` installed
+- The MPACT simulator built via Bazel
+
+== Quick Run via iree-tools
+
+[source,bash]
+----
+cd iree-tools
+uv run python main.py simulate \
+  ../coralnpu/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+Output:
+
+----
+output_0: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+Cycle count: 342
+----
+
+=== Specify Output Array Sizes
+
+For models with non-default output sizes:
+
+[source,bash]
+----
+uv run python main.py simulate program.elf \
+  --output-sizes output_0=64 output_1=32
+----
+
+== Run via Bazel Directly
+
+=== MPACT Behavioral Simulator
+
+[source,bash]
+----
+cd coralnpu
+bazel run //sim:coralnpu_v2_sim -- \
+  $(pwd)/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+=== MPACT Interactive Mode
+
+[source,bash]
+----
+bazel run //sim:coralnpu_v2_sim -- --i \
+  $(pwd)/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+Interactive mode lets you step through instructions and inspect registers/memory.
+
+=== Verilator Cycle-Accurate Simulator
+
+For timing analysis:
+
+[source,bash]
+----
+bazel build //tests/verilator_sim:rvv_core_mini_axi_sim
+bazel-bin/tests/verilator_sim/rvv_core_mini_axi_sim --binary \
+  bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+NOTE: Verilator simulation is significantly slower than MPACT but provides cycle-accurate timing.
+
+== Programmatic Simulator API (Python)
+
+For scripted testing with custom input data:
+
+[source,python]
+----
+import numpy as np
+from coralnpu_v2_sim_utils import CoralNPUV2Simulator
+
+elf_path = "../coralnpu/bazel-bin/.../coralnpu_v2_rgb2grayscale.elf"
+
+# Initialize simulator
+sim = CoralNPUV2Simulator()
+entry, symbols = sim.get_elf_entry_and_symbol(
+    elf_path, ["input_0", "output_0"]
+)
+sim.load_program(elf_path, entry)
+
+# Write test input (3-channel 4×4 image with known values)
+test_image = np.array([
+    # Red channel (4×4)
+    1.0, 0.0, 0.0, 1.0,  0.0, 1.0, 0.0, 0.0,
+    1.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0, 1.0,
+    # Green channel (4×4)
+    0.0, 1.0, 0.0, 0.0,  1.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,  1.0, 0.0, 0.0, 1.0,
+    # Blue channel (4×4)
+    0.0, 0.0, 1.0, 0.0,  0.0, 0.0, 0.0, 1.0,
+    0.0, 0.0, 0.0, 1.0,  0.0, 1.0, 0.0, 0.0,
+], dtype=np.float32)
+
+sim.write_memory(
+    symbols["input_0"],
+    test_image.view(np.uint8)
+)
+
+# Run
+sim.run()
+sim.wait()
+
+# Read output (1-channel 4×4 grayscale)
+output_bytes = sim.read_memory(symbols["output_0"], 16 * 4)  # 16 floats × 4 bytes
+result = np.frombuffer(output_bytes, dtype=np.float32)
+
+print(f"Grayscale output: {result}")
+print(f"Cycle count: {sim.read_csr('mcycle')}")
+----
+
+Expected output for a pure-red pixel: `0.299 × 1.0 + 0.587 × 0.0 + 0.114 × 0.0 = 0.299`.
+
+== Execution Flow Inside the Simulator
+
+[mermaid]
+....
+sequenceDiagram
+    participant Host as Host Python
+    participant Sim as MPACT Simulator
+    participant Mem as Simulated Memory
+
+    Host->>Sim: load_program(elf, entry=0x0)
+    Sim->>Mem: Load .text → ITCM (0x00000000)
+    Sim->>Mem: Load .data → DTCM (0x00010000)
+
+    Host->>Sim: write_memory(input_0_addr, data)
+    Sim->>Mem: Write floats to input_0 location
+
+    Host->>Sim: run()
+    Note over Sim: _start: init SP, clear BSS,<br/>enable FP/Vector, call main()
+    Note over Sim: main(): execute convolution loops
+    Note over Sim: ebreak → halt
+
+    Host->>Sim: read_memory(output_0_addr, 64)
+    Sim->>Mem: Read 16 floats from output_0
+    Mem-->>Host: grayscale pixel values
+....
+
+== Comparing Host vs. Simulator Output
+
+To validate correctness, compare the simulator output against IREE host execution:
+
+[source,bash]
+----
+# Reference output from IREE on host
+uv run python main.py verify rgb2grayscale.mlir
+
+# Simulator output
+uv run python main.py simulate path/to/program.elf
+
+# Or run both in one command
+uv run python main.py run-all rgb2grayscale.mlir
+----
+
+The `run-all` command prints both outputs side-by-side for manual comparison. Automated comparison is planned but not yet implemented.
+
+== Common Issues
+
+=== "Symbol not found"
+
+The simulator cannot find `input_0` or `output_0` in the ELF. This means the arrays were optimized away by the compiler. Ensure the arrays use `+__attribute__((section(".data")))+` to prevent dead-code elimination.
+
+=== Simulator hangs
+
+The program may be stuck in an infinite loop. Use interactive mode (`--i`) to step through and identify the issue.
+
+=== Non-zero output with zero input
+
+Check that the `.bss` section is being cleared properly by the CRT startup. The `coralnpu_start.S` zeros `.bss` before calling `main()`, but arrays in `.data` (with the section attribute) are not zeroed — they contain whatever the simulator loaded.

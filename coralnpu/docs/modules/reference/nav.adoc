@@ -1,0 +1,7 @@
+* Reference
+** xref:reference:coralnpu-isa.adoc[Coral NPU ISA]
+** xref:reference:memory-map.adoc[Memory Map]
+** xref:reference:iree-tools-cli.adoc[iree-tools CLI]
+** xref:reference:stablehlo-ops.adoc[Supported StableHLO Ops]
+** xref:reference:skainet-modules.adoc[SKaiNET Module Map]
+** xref:reference:bazel-rules.adoc[Bazel Build Rules]

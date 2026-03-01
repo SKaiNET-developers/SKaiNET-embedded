@@ -1,0 +1,7 @@
+* How-to Guides
+** xref:howto:export-stablehlo.adoc[Export StableHLO from SKaiNET]
+** xref:howto:transpile-mlir-to-c.adoc[Transpile MLIR to C]
+** xref:howto:build-elf-for-npu.adoc[Build ELF for NPU]
+** xref:howto:run-on-simulator.adoc[Run on MPACT Simulator]
+** xref:howto:setup-java-dev-env.adoc[Set Up Java/Android Dev Environment]
+** xref:howto:optimize-hlo.adoc[Optimize StableHLO IR]

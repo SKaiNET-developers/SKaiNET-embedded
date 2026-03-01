@@ -1,0 +1,132 @@
+= How to Transpile MLIR to C
+:description: Use the iree-tools Python transpiler to convert a StableHLO MLIR file into C source code compatible with the coralnpu_v2_binary Bazel rule.
+
+== Prerequisites
+
+- `uv` installed (Python environment manager)
+- A valid StableHLO MLIR file (see xref:howto:export-stablehlo.adoc[])
+
+== Install Dependencies
+
+[source,bash]
+----
+cd iree-tools
+uv sync   # installs dependencies from pyproject.toml
+----
+
+== Generate C Source
+
+[source,bash]
+----
+uv run python main.py generate-c rgb2grayscale.mlir
+----
+
+Output:
+
+----
+Generated C source: out/rgb2grayscale.cc
+----
+
+=== Specify a Custom Output Path
+
+[source,bash]
+----
+uv run python main.py generate-c rgb2grayscale.mlir -o my_model.cc
+----
+
+== Understand the Generated Code
+
+The transpiler produces C source following `coralnpu_v2_binary` conventions:
+
+[source,c]
+----
+// Input arrays — placed in DTCM via section attribute
+float input_0[48] __attribute__((section(".data")));
+
+// Output arrays — also in DTCM
+float output_0[16] __attribute__((section(".data")));
+
+// Compile-time constants — placed in ITCM (.rodata)
+static const float v0[3] = {0.2989f, 0.587f, 0.114f};
+
+int main() {
+  // Generated loop nest
+  for (int i = 0; i < 16; i++) {
+    float sum = 0.0f;
+    for (int c = 0; c < 3; c++) {
+      sum += input_0[c * 16 + i] * v0[c];
+    }
+    output_0[i] = sum;
+  }
+  return 0;
+}
+----
+
+=== Naming Conventions
+
+[cols="1,1,2"]
+|===
+|MLIR |C |Rule
+
+|`%arg0`, `%arg1`, ...
+|`input_0`, `input_1`, ...
+|Function arguments become indexed input arrays
+
+|Return values
+|`output_0`, `output_1`, ...
+|Return operands become indexed output arrays
+
+|`%v0`, `%v1`, ...
+|`v0`, `v1`, ...
+|SSA names become C variable names (% stripped)
+
+|`tensor<1x3x4x4xf32>`
+|`float name[48]`
+|Shape flattened to element count; f16/f32 → `float`
+|===
+
+=== Type Promotion
+
+The Coral NPU has hardware f32 but no hardware f16. All `f16` types in the MLIR are promoted to `f32` in the generated C. The `stablehlo.convert` operation between f16 and f32 becomes a no-op (variable aliasing).
+
+== Supported StableHLO Operations
+
+[cols="1,2"]
+|===
+|Operation |C Translation
+
+|`stablehlo.constant dense<...>`
+|`static const float name[N] = \{values};`
+
+|`stablehlo.convert` (f16↔f32)
+|No-op — aliased to the same C variable
+
+|`stablehlo.convolution` (1×1)
+|Optimized 2-loop nest
+
+|`stablehlo.convolution` (general)
+|7-deep loop nest with stride/dilation/padding
+
+|`stablehlo.add`
+|`out[i] = lhs[i] + rhs[i]`
+
+|`stablehlo.multiply`
+|`out[i] = lhs[i] * rhs[i]`
+
+|`stablehlo.subtract`
+|`out[i] = lhs[i] - rhs[i]`
+
+|`stablehlo.divide`
+|`out[i] = lhs[i] / rhs[i]`
+|===
+
+== Limitations
+
+- Only float32 computation (no quantized int8/int16)
+- No tiling for large tensors — all data must fit in DTCM
+- No SIMD intrinsics — relies on Clang `-O3` auto-vectorization
+- Regex-based MLIR parsing — may fail on non-standard formatting
+
+== Next Steps
+
+- xref:howto:build-elf-for-npu.adoc[] — compile the generated C to a RISC-V ELF

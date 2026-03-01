@@ -1,0 +1,117 @@
+= Coral NPU Full Stack Documentation
+:description: End-to-end documentation for deploying ML models on Google Coral NPU — from Kotlin DSL through StableHLO MLIR to bare-metal RISC-V execution.
+:keywords: coral npu, skainet, mlir, stablehlo, risc-v, edge ai
+
+The Coral NPU stack spans three repositories that together form a complete pipeline for compiling and running ML models on Google's Coral Neural Processing Unit:
+
+[cols="1,2,1"]
+|===
+|Component |Purpose |Language
+
+|*SKaiNET*
+|Type-safe tensor DSL, computation graph construction, StableHLO MLIR export, optimization passes
+|Kotlin Multiplatform
+
+|*iree-tools*
+|StableHLO MLIR parser, C code generator, Bazel integration, simulator driver
+|Python (uv)
+
+|*coralnpu*
+|Hardware design (Chisel/Verilog), Bazel cross-compiler toolchain, MPACT behavioral simulator, bare-metal CRT
+|C / SystemVerilog / Python
+|===
+
+[mermaid]
+....
+flowchart LR
+    subgraph SKaiNET ["SKaiNET (Kotlin)"]
+        DSL["Tensor DSL<br/>dag { ... }"]
+        TAPE["Tape Recording"]
+        HLO["StableHLO Export"]
+    end
+
+    subgraph IREE ["iree-tools (Python)"]
+        PARSE["MLIR Parser"]
+        CODEGEN["C Code Generator"]
+        BUILD["Bazel Builder"]
+    end
+
+    subgraph NPU ["coralnpu (Bazel)"]
+        CC["RV32 Cross-Compile"]
+        ELF["Bare-Metal ELF"]
+        SIM["MPACT Simulator"]
+    end
+
+    DSL --> TAPE --> HLO
+    HLO -->|".mlir"| PARSE --> CODEGEN --> BUILD
+    BUILD -->|".cc + BUILD"| CC --> ELF --> SIM
+
+    style SKaiNET fill:#e1f5fe,stroke:#0277bd
+    style IREE fill:#fff3e0,stroke:#e65100
+    style NPU fill:#e8f5e9,stroke:#2e7d32
+....
+
+== Documentation Structure (Diataxis)
+
+This documentation follows the https://diataxis.fr/[Diataxis framework]:
+
+Explanation (understanding-oriented)::
+Deep technical analysis of _why_ the architecture works the way it does. Written for experienced ML engineers and data scientists who need to understand the compilation pipeline, hardware constraints, and design trade-offs.
++
+xref:explanation:architecture-overview.adoc[Start here] if you want to understand the full stack.
+
+Tutorials (learning-oriented)::
+Step-by-step walkthroughs that take you from zero to a running model on the simulator. Follow along exactly to build working results.
++
+xref:tutorials:grayscale-to-simulator.adoc[Grayscale to Simulator] — the canonical end-to-end example.
+
+How-to Guides (task-oriented)::
+Concise recipes for specific tasks. Assumes you understand the basics and need to accomplish something concrete. Targeted at Android/Java developers integrating with the stack.
++
+xref:howto:setup-java-dev-env.adoc[Set Up Java/Android Dev Environment] is a good starting point for Android developers.
+
+Reference (information-oriented)::
+Precise technical specifications — ISA details, memory maps, CLI flags, module inventories. Consult when you need exact values.
++
+xref:reference:iree-tools-cli.adoc[iree-tools CLI Reference] documents every subcommand.
+
+== Quick Start
+
+[source,bash]
+----
+# 1. Export StableHLO MLIR from SKaiNET
+cd SKaiNET
+./gradlew :skainet-apps:skainet-grayscale-cli:run \
+  --args="--input photo.jpg --model RGB2GRAYSCALE --verbose"
+
+# 2. Transpile MLIR to C, build ELF, run on simulator
+cd ../iree-tools
+uv run python main.py run-all rgb2grayscale.mlir
+----
+
+== Prerequisites
+
+[cols="1,1,2"]
+|===
+|Tool |Version |Install
+
+|`uv`
+|Latest
+|`curl -LsSf \https://astral.sh/uv/install.sh \| sh`
+
+|`jenv`
+|Latest
+|`git clone \https://github.com/jenv/jenv.git ~/.jenv`
+
+|JDK
+|21+
+|`jenv add /path/to/jdk-21` after installing via your package manager
+
+|Bazel
+|7.4.1
+|Via Bazelisk: `npm install -g @aspect-bazel/bazelisk`
+
+|Python
+|3.11+
+|Managed by `uv` — no system install needed
+|===

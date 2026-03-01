@@ -1,0 +1,253 @@
+= Memory Map Reference
+:description: Complete memory address map for the Coral NPU, covering ITCM, DTCM, EXTMEM, and the linker script layout.
+
+== Address Space
+
+----
+0x00000000  ┌─────────────────────┐
+            │   ITCM              │  8 KB (0x2000 bytes)
+            │   .text             │  Machine code
+            │   .rodata           │  Read-only data (constants)
+            │   .init_array       │  C++ static constructors
+0x00002000  ├─────────────────────┤
+            │   (unmapped gap)    │
+0x00010000  ├─────────────────────┤
+            │   DTCM              │  32 KB (0x8000 bytes)
+            │   .data             │  Initialized global variables
+            │   .bss              │  Zero-initialized globals
+            │   .heap             │  Dynamic allocation (grows up)
+            │   .stack            │  Stack (grows down from top)
+0x00018000  ├─────────────────────┤
+            │   (unmapped gap)    │
+0x20000000  ├─────────────────────┤
+            │   EXTMEM            │  4 MB (0x400000 bytes)
+            │   .extdata          │  Overflow initialized data
+            │   .extbss           │  Overflow zero-initialized data
+0x20400000  └─────────────────────┘
+----
+
+== Memory Regions
+
+[cols="1,1,1,1,2"]
+|===
+|Region |Base |Size |End |Contents
+
+|ITCM
+|`0x00000000`
+|8 KB
+|`0x00002000`
+|Code, read-only data, init arrays
+
+|DTCM
+|`0x00010000`
+|32 KB
+|`0x00018000`
+|Data, BSS, heap (up), stack (down)
+
+|EXTMEM
+|`0x20000000`
+|4 MB
+|`0x20400000`
+|Overflow data (higher latency)
+|===
+
+== Linker Script Sections
+
+From `coralnpu_tcm.ld.tpl`:
+
+=== ITCM Sections (Code Memory)
+
+[cols="1,2,1"]
+|===
+|Section |Contents |Alignment
+
+|`.text`
+|Machine code (`main()`, loops, CRT startup)
+|4 bytes
+
+|`.rodata`
+|Read-only constants (weight arrays, string literals)
+|4 bytes
+
+|`.init_array`
+|C++ static constructor pointers
+|4 bytes
+
+|`.fini_array`
+|C++ static destructor pointers
+|4 bytes
+|===
+
+=== DTCM Sections (Data Memory)
+
+[cols="1,2,1"]
+|===
+|Section |Contents |Alignment
+
+|`.data`
+|Initialized global variables (input/output arrays with `+__attribute__((section(".data")))+`)
+|4 bytes
+
+|`.sdata`
+|Small initialized data (accessed via global pointer)
+|4 bytes
+
+|`.bss`
+|Zero-initialized globals (cleared by CRT startup)
+|4 bytes
+
+|`.sbss`
+|Small zero-initialized data
+|4 bytes
+
+|`.heap`
+|Dynamic allocation area (grows upward from `_heap_start`)
+|8 bytes
+
+|`.stack`
+|Stack area (grows downward from `_stack_top`)
+|16 bytes
+|===
+
+=== EXTMEM Sections (External Memory)
+
+[cols="1,2,1"]
+|===
+|Section |Contents |Alignment
+
+|`.extdata`
+|Large initialized data that overflows DTCM
+|4 bytes
+
+|`.extbss`
+|Large zero-initialized data that overflows DTCM
+|4 bytes
+|===
+
+== Linker Symbols
+
+The linker script exports symbols used by CRT startup and the simulator:
+
+[cols="1,1,2"]
+|===
+|Symbol |Type |Purpose
+
+|`_text_start`
+|Address
+|Start of `.text` section
+
+|`_text_end`
+|Address
+|End of `.text` section
+
+|`_data_start`
+|Address
+|Start of `.data` section in DTCM
+
+|`_bss_start`
+|Address
+|Start of `.bss` (cleared by CRT)
+
+|`_bss_end`
+|Address
+|End of `.bss`
+
+|`_heap_start`
+|Address
+|Bottom of heap (for `_sbrk()`)
+
+|`_stack_top`
+|Address
+|Top of stack (initial SP value)
+
+|`_ret`
+|Variable
+|Return value from `main()` (written by CRT)
+
+|`__global_pointer$`
+|Address
+|Global pointer for `gp` register
+
+|`input_0`, `input_1`
+|Variable
+|Input arrays (accessed by simulator)
+
+|`output_0`, `output_1`
+|Variable
+|Output arrays (read by simulator)
+|===
+
+== Memory Budget Example: RGB-to-Grayscale
+
+[cols="1,1,1,1"]
+|===
+|Item |Region |Size (bytes) |Size (floats)
+
+|`input_0` (1×3×4×4)
+|DTCM
+|192
+|48
+
+|`output_0` (1×1×4×4)
+|DTCM
+|64
+|16
+
+|`v0` (weights)
+|ITCM
+|12
+|3
+
+|Code (main + CRT)
+|ITCM
+|~2,000
+|—
+
+|Stack
+|DTCM
+|~1,024
+|—
+
+|*Total ITCM*
+|
+|*~2,012 / 8,192 (25%)*
+|
+
+|*Total DTCM*
+|
+|*~1,280 / 32,768 (4%)*
+|
+|===
+
+== Memory Budget Example: 224×224 RGB Image
+
+[cols="1,1,1,1"]
+|===
+|Item |Region |Size (bytes) |Fits?
+
+|Input (1×3×224×224)
+|DTCM
+|602,112
+|No (32 KB limit) — must use EXTMEM or tiling
+
+|Output (1×1×224×224)
+|DTCM
+|200,704
+|No — must use EXTMEM or tiling
+
+|Weights (1×3×1×1)
+|ITCM
+|12
+|Yes
+|===
+
+For production models, tiling is required: process the image in spatial tiles (e.g., 16×16) that fit in DTCM, writing results back to EXTMEM between tiles.
+
+== I/O Convention
+
+The NPU uses a shared-memory I/O model:
+
+1. **Simulator writes** input data to the `input_0` symbol address in DTCM
+2. **Program executes** `main()`, reading from `input_0` and writing to `output_0`
+3. **Simulator reads** output data from the `output_0` symbol address
+4. No syscalls, no file I/O, no interrupts — pure memory-mapped data exchange

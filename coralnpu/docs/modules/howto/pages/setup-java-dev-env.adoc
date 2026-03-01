@@ -1,0 +1,232 @@
+= How to Set Up a Java/Android Dev Environment
+:description: Configure your development environment with jenv, JDK 21, Gradle, and uv to work with the Coral NPU stack — targeted at Android and Java developers.
+
+== Overview
+
+The Coral NPU stack uses two language ecosystems:
+
+- **Kotlin/JVM** (SKaiNET): model definition, tensor DSL, HLO compilation
+- **Python** (iree-tools): MLIR transpilation, simulator integration
+
+This guide sets up both, using `jenv` for Java version management and `uv` for Python.
+
+== Install jenv (Java Version Manager)
+
+`jenv` lets you switch between JDK versions per-project without modifying system settings.
+
+[source,bash]
+----
+# Clone jenv
+git clone https://github.com/jenv/jenv.git ~/.jenv
+
+# Add to shell (zsh)
+echo 'export PATH="$HOME/.jenv/bin:$PATH"' >> ~/.zshrc
+echo 'eval "$(jenv init -)"' >> ~/.zshrc
+source ~/.zshrc
+
+# Enable Gradle plugin (sets JAVA_HOME automatically)
+jenv enable-plugin gradle
+jenv enable-plugin export
+----
+
+== Install JDK 21
+
+SKaiNET requires JDK 21+ for the JDK Vector API (SIMD operations).
+
+=== Ubuntu/Debian
+
+[source,bash]
+----
+sudo apt update
+sudo apt install openjdk-21-jdk
+
+# Register with jenv
+jenv add /usr/lib/jvm/java-21-openjdk-amd64
+----
+
+=== macOS (Homebrew)
+
+[source,bash]
+----
+brew install openjdk@21
+jenv add /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+----
+
+=== SDKMAN Alternative
+
+[source,bash]
+----
+curl -s "https://get.sdkman.io" | bash
+sdk install java 21.0.4-tem
+jenv add ~/.sdkman/candidates/java/21.0.4-tem
+----
+
+=== Set JDK 21 as Default
+
+[source,bash]
+----
+# Set globally
+jenv global 21
+
+# Or set per-project (creates .java-version file)
+cd coral/SKaiNET
+jenv local 21
+
+# Verify
+java -version
+# openjdk version "21.x.x" ...
+----
+
+== Install uv (Python Environment Manager)
+
+`uv` manages Python versions and virtual environments. No system Python installation needed.
+
+[source,bash]
+----
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Verify
+uv --version
+----
+
+=== Set Up iree-tools
+
+[source,bash]
+----
+cd coral/iree-tools
+uv sync  # Creates .venv and installs all dependencies
+----
+
+This installs:
+
+- Python 3.11+ (managed by uv)
+- `numpy` (for simulator data handling)
+- `iree-compiler` and `iree-runtime` (for host verification)
+
+== Install Bazel
+
+Bazel builds the Coral NPU cross-compilation toolchain and simulator.
+
+[source,bash]
+----
+# Via Bazelisk (recommended — auto-downloads correct Bazel version)
+npm install -g @aspect-bazel/bazelisk
+
+# Verify
+bazel --version
+# bazel 7.4.1
+----
+
+== Build SKaiNET
+
+[source,bash]
+----
+cd coral/SKaiNET
+
+# Ensure JDK 21 is active
+jenv local 21
+
+# Build all modules
+./gradlew build
+
+# Build specific modules
+./gradlew :skainet-lang:skainet-lang-core:build
+./gradlew :skainet-compile:skainet-compile-hlo:build
+./gradlew :skainet-apps:skainet-grayscale-cli:build
+
+# Run tests
+./gradlew test
+----
+
+=== Key Gradle Tasks for Android/Java Developers
+
+[cols="1,2"]
+|===
+|Task |Purpose
+
+|`./gradlew build`
+|Build all modules
+
+|`./gradlew test`
+|Run all tests
+
+|`./gradlew :skainet-apps:skainet-grayscale-cli:run --args="--help"`
+|Run the grayscale CLI
+
+|`./gradlew publishToMavenLocal`
+|Publish to local Maven repo (for Android project integration)
+
+|`./gradlew :skainet-compile:skainet-compile-hlo:generateHlo`
+|Export StableHLO MLIR
+
+|`./gradlew koverHtmlReport`
+|Generate test coverage report
+|===
+
+== Build the MPACT Simulator
+
+[source,bash]
+----
+cd coral/coralnpu
+bazel build //sim:coralnpu_v2_sim
+----
+
+NOTE: The simulator requires the host Clang toolchain constraint (`//toolchain/host_clang:clang_compiler`). If Clang is not installed, `sudo apt install clang` (Ubuntu/Debian).
+
+== Project Structure for Android Integration
+
+To use SKaiNET in an Android project, add the Maven dependency after publishing locally:
+
+[source,kotlin]
+----
+// build.gradle.kts (Android module)
+dependencies {
+    implementation("sk.ainet:skainet-lang-core:0.1.0")
+    implementation("sk.ainet:skainet-compile-hlo:0.1.0")
+    implementation("sk.ainet:skainet-io-image:0.1.0")
+}
+----
+
+=== Android-Specific Considerations
+
+JDK Vector API:: Not available on Android. Use `skainet-backend-cpu` with the non-SIMD fallback, or target the `native` Kotlin Multiplatform target for computation-heavy workloads.
+
+Model Deployment:: For on-device inference, export to StableHLO and compile offline. Ship the compiled artifact (ELF for NPU, or native library for CPU) with the APK.
+
+Memory:: Android devices have more RAM than the Coral NPU, but you should still profile memory usage when working with large models.
+
+== Verify the Full Stack
+
+Run the end-to-end pipeline to confirm everything works:
+
+[source,bash]
+----
+# 1. Build SKaiNET
+cd coral/SKaiNET && jenv local 21 && ./gradlew build
+
+# 2. Run grayscale CLI
+./gradlew :skainet-apps:skainet-grayscale-cli:run \
+  --args="--input test.jpg --verbose"
+
+# 3. Run iree-tools pipeline
+cd ../iree-tools && uv run python main.py run-all rgb2grayscale.mlir
+
+# 4. Build and run on simulator
+cd ../coralnpu && bazel run //sim:coralnpu_v2_sim -- \
+  $(pwd)/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+== IDE Setup
+
+=== IntelliJ IDEA / Android Studio
+
+1. Open `coral/SKaiNET` as a Gradle project
+2. Set Project SDK to JDK 21 (File → Project Structure → SDK)
+3. Enable Kotlin KSP plugin support (auto-detected by Gradle)
+4. Run configurations: use Gradle tasks (not direct Kotlin run)
+
+=== VS Code (for Python/iree-tools)
+
+1. Open `coral/iree-tools`
+2. Install Python extension
+3. Set Python interpreter to `.venv/bin/python` (created by `uv sync`)

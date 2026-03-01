@@ -1,0 +1,264 @@
+= Supported StableHLO Operations
+:description: Reference for StableHLO operations supported by the iree-tools transpiler, including MLIR syntax, IR dataclass mapping, and generated C code.
+
+== Overview
+
+The iree-tools transpiler supports a subset of the https://github.com/openxla/stablehlo/blob/main/docs/spec.md[StableHLO specification]. Operations outside this set will be silently skipped during parsing.
+
+== `stablehlo.constant`
+
+Defines a compile-time constant tensor.
+
+=== MLIR Syntax
+
+[source,mlir]
+----
+%v0 = stablehlo.constant dense<[[[[0.2989]], [[0.587]], [[0.114]]]]>
+    : tensor<1x3x1x1xf32>
+----
+
+=== IR Dataclass
+
+[source,python]
+----
+ConstantOp(
+    result_name="%v0",
+    values=[0.2989, 0.587, 0.114],
+    result_type=TensorType(shape=[1, 3, 1, 1], element_type="f32")
+)
+----
+
+=== Generated C
+
+[source,c]
+----
+static const float v0[3] = {0.2989f, 0.587f, 0.114f};
+----
+
+=== Notes
+
+- Values are extracted from arbitrarily nested brackets in row-major order
+- Placed in `.rodata` (ITCM) as `static const`
+- Supports scalar, 1D, 2D, 3D, and 4D tensors
+
+== `stablehlo.convert`
+
+Type conversion between tensor element types.
+
+=== MLIR Syntax
+
+[source,mlir]
+----
+%v3 = stablehlo.convert %v1 : (tensor<1x3x4x4xf16>) -> tensor<1x3x4x4xf32>
+----
+
+=== IR Dataclass
+
+[source,python]
+----
+ConvertOp(
+    result_name="%v3",
+    operand="%v1",
+    input_type=TensorType(shape=[1, 3, 4, 4], element_type="f16"),
+    result_type=TensorType(shape=[1, 3, 4, 4], element_type="f32")
+)
+----
+
+=== Generated C
+
+No code generated — the result aliases the operand variable. The Coral NPU has no hardware f16, so all values are stored as f32.
+
+== `stablehlo.convolution`
+
+N-dimensional convolution with configurable strides, padding, and dilation.
+
+=== MLIR Syntax
+
+[source,mlir]
+----
+%v1 = stablehlo.convolution(%arg0, %v0)
+    dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],
+    window = {stride = [1, 1], pad = [[0, 0], [0, 0]], rhs_dilate = [1, 1]}
+    {batch_group_count = 1 : i64, feature_group_count = 1 : i64}
+    : (tensor<1x3x4x4xf32>, tensor<1x3x1x1xf32>) -> tensor<1x1x4x4xf32>
+----
+
+=== IR Dataclass
+
+[source,python]
+----
+ConvolutionOp(
+    result_name="%v1",
+    lhs="%arg0",                       # input tensor
+    rhs="%v0",                         # kernel tensor
+    lhs_type=TensorType([1,3,4,4], "f32"),   # [N, C_IN, H, W]
+    rhs_type=TensorType([1,3,1,1], "f32"),   # [C_OUT, C_IN, KH, KW]
+    result_type=TensorType([1,1,4,4], "f32"),# [N, C_OUT, OH, OW]
+    strides=[1, 1],
+    padding=[[0, 0], [0, 0]],
+    rhs_dilate=[1, 1],
+    batch_group_count=1,
+    feature_group_count=1
+)
+----
+
+=== Generated C (1×1 Optimized)
+
+When kernel is 1×1, stride is 1, and padding is 0:
+
+[source,c]
+----
+// 1x1 convolution: 3 input channels -> 1 output channels
+for (int i = 0; i < 16; i++) {
+  float sum = 0.0f;
+  for (int c = 0; c < 3; c++) {
+    sum += input_0[c * 16 + i] * v0[c];
+  }
+  output_0[i] = sum;
+}
+----
+
+=== Generated C (General Case)
+
+For non-1×1 kernels:
+
+[source,c]
+----
+// General convolution: [N,C_IN,IH,IW] * [C_OUT,C_IN,KH,KW] -> [N,C_OUT,OH,OW]
+for (int n_idx = 0; n_idx < N; n_idx++) {
+  for (int oc = 0; oc < C_OUT; oc++) {
+    for (int oh_idx = 0; oh_idx < OH; oh_idx++) {
+      for (int ow_idx = 0; ow_idx < OW; ow_idx++) {
+        float sum = 0.0f;
+        for (int ic = 0; ic < C_IN; ic++) {
+          for (int kh_idx = 0; kh_idx < KH; kh_idx++) {
+            for (int kw_idx = 0; kw_idx < KW; kw_idx++) {
+              int ih_idx = oh_idx * STRIDE_H + kh_idx * DIL_H;
+              int iw_idx = ow_idx * STRIDE_W + kw_idx * DIL_W;
+              sum += input[...] * kernel[...];
+            }
+          }
+        }
+        output[...] = sum;
+      }
+    }
+  }
+}
+----
+
+=== Attributes
+
+[cols="1,1,2"]
+|===
+|Attribute |Default |Description
+
+|`stride`
+|`[1, 1]`
+|Spatial stride in [H, W]
+
+|`pad`
+|`[[0,0], [0,0]]`
+|Padding in [[top, bottom], [left, right]]
+
+|`rhs_dilate`
+|`[1, 1]`
+|Kernel dilation in [H, W]
+
+|`batch_group_count`
+|1
+|Batch grouping (for grouped convolutions)
+
+|`feature_group_count`
+|1
+|Feature grouping (for depthwise convolutions)
+|===
+
+=== Layout Assumption
+
+The transpiler assumes NCHW layout (`dim_numbers = [b, f, 0, 1]`):
+
+- LHS (input): `[N, C_IN, H, W]`
+- RHS (kernel): `[C_OUT, C_IN, KH, KW]`
+- Result: `[N, C_OUT, OH, OW]`
+
+== `stablehlo.add`
+
+Element-wise addition.
+
+=== MLIR Syntax
+
+[source,mlir]
+----
+%v3 = stablehlo.add %v1, %v2 : tensor<1x1x4x4xf32>
+----
+
+=== Generated C
+
+[source,c]
+----
+// element-wise add
+for (int i = 0; i < 16; i++) {
+  output_0[i] = v1[i] + v2[i];
+}
+----
+
+== `stablehlo.multiply`
+
+Element-wise multiplication.
+
+=== MLIR Syntax
+
+[source,mlir]
+----
+%v3 = stablehlo.multiply %v1, %v2 : tensor<1x1x4x4xf32>
+----
+
+=== Generated C
+
+[source,c]
+----
+// element-wise multiply
+for (int i = 0; i < 16; i++) {
+  output_0[i] = v1[i] * v2[i];
+}
+----
+
+== `stablehlo.subtract`
+
+Element-wise subtraction.
+
+=== Generated C
+
+[source,c]
+----
+for (int i = 0; i < 16; i++) {
+  output_0[i] = v1[i] - v2[i];
+}
+----
+
+== `stablehlo.divide`
+
+Element-wise division.
+
+=== Generated C
+
+[source,c]
+----
+for (int i = 0; i < 16; i++) {
+  output_0[i] = v1[i] / v2[i];
+}
+----
+
+== Unsupported Operations
+
+Operations not listed above are silently skipped during parsing. Common StableHLO operations that are NOT yet supported:
+
+- `stablehlo.dot_general` (matrix multiply — use convolution instead)
+- `stablehlo.transpose`
+- `stablehlo.reshape`
+- `stablehlo.broadcast_in_dim`
+- `stablehlo.maximum` / `stablehlo.minimum`
+- `stablehlo.reduce`
+- `stablehlo.concatenate`
+- `stablehlo.slice`
+- `stablehlo.gather` / `stablehlo.scatter`

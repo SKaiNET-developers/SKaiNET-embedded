@@ -1,0 +1,228 @@
+= Optimization Passes
+:description: Detailed explanation of SKaiNET's StableHLO optimization framework — constant folding, dead code elimination, and operation fusion — with examples of MLIR transformations at each stage.
+
+== Why Optimize Before Transpilation?
+
+The StableHLO MLIR produced by SKaiNET's converter is a _direct_ translation of the computation graph — it contains every operation the user defined, including redundant computations, unused intermediates, and operations that could be combined. Optimizing the MLIR before transpiling to C reduces:
+
+- **Code size** — critical when ITCM is 8 KB
+- **Runtime computation** — fewer loop nests, fewer memory accesses
+- **Memory footprint** — fewer intermediate arrays in DTCM (32 KB)
+
+== The Optimization Pipeline
+
+[mermaid]
+....
+flowchart LR
+    subgraph DEFAULT ["Default Pipeline"]
+        direction LR
+        CF1["Constant<br/>Folding"] --> FUSE1["Operation<br/>Fusion"] --> DCE1["Dead Code<br/>Elimination"]
+    end
+
+    subgraph AGGRESSIVE ["Aggressive Pipeline"]
+        direction LR
+        CF2["Constant<br/>Folding"] --> FUSE2["Operation<br/>Fusion"] --> DCE2["Dead Code<br/>Elimination"] --> CF3["Constant<br/>Folding<br/>(2nd pass)"]
+    end
+
+    INPUT["Unoptimized<br/>MLIR"] --> DEFAULT
+    INPUT --> AGGRESSIVE
+    DEFAULT --> OUT1["Optimized MLIR"]
+    AGGRESSIVE --> OUT2["Aggressively<br/>Optimized MLIR"]
+....
+
+Pass order matters. Constant folding simplifies expressions that enable fusion patterns. Fusion may create new constants (e.g., fused bias values) that a second constant folding pass can evaluate. DCE runs last to clean up operations made dead by earlier passes.
+
+== Pass 1: Constant Folding
+
+Evaluates operations on compile-time-known values, replacing them with their results.
+
+=== Before
+
+[source,mlir]
+----
+%0 = stablehlo.constant dense<2.0> : tensor<f32>
+%1 = stablehlo.constant dense<3.0> : tensor<f32>
+%2 = stablehlo.add %0, %1 : tensor<f32>       <1>
+%3 = stablehlo.multiply %2, %arg0 : tensor<f32>
+----
+<1> Both operands are constants — this can be evaluated at compile time.
+
+=== After
+
+[source,mlir]
+----
+%2 = stablehlo.constant dense<5.0> : tensor<f32>   <1>
+%3 = stablehlo.multiply %2, %arg0 : tensor<f32>
+----
+<1> The addition is gone. The result is a single constant.
+
+=== Supported Constant Folding Operations
+
+- `stablehlo.add` — element-wise addition of constant tensors
+- `stablehlo.multiply` — element-wise multiplication
+- `stablehlo.subtract` — element-wise subtraction
+- `stablehlo.divide` — element-wise division
+
+=== Impact on Transpiled C
+
+Without constant folding, the C code would contain an unnecessary loop computing `2.0 + 3.0` at runtime for every element. With folding, the constant `5.0` is baked into the binary.
+
+== Pass 2: Operation Fusion
+
+Combines sequences of operations into more efficient compound operations. Fusion reduces intermediate memory allocations and improves data locality.
+
+=== Pattern: Add + ReLU
+
+[source,mlir]
+----
+// Before fusion
+%0 = stablehlo.add %arg0, %arg1 : tensor<2x2xf32>
+%1 = stablehlo.constant dense<0.0> : tensor<2x2xf32>
+%2 = stablehlo.maximum %0, %1 : tensor<2x2xf32>       <1>
+----
+<1> `maximum(x, 0)` is ReLU. Combined with the preceding add, this becomes a fused add-relu.
+
+[source,mlir]
+----
+// After fusion
+%2 = stablehlo.add %arg0, %arg1 {fused_activation = "relu"} : tensor<2x2xf32>
+----
+
+The fused operation reads input once, computes add and relu in the same loop iteration, and writes output once — eliminating the intermediate tensor `%0`.
+
+=== Pattern: Element-wise Chain
+
+[source,mlir]
+----
+// Before fusion
+%0 = stablehlo.add %arg0, %arg1 : tensor<2x2xf32>
+%1 = stablehlo.multiply %0, %arg2 : tensor<2x2xf32>
+----
+
+[source,mlir]
+----
+// After fusion
+%1 = stablehlo.custom %arg0, %arg1, %arg2 {fusion_type = "fused_add_mul"} : tensor<2x2xf32>
+----
+
+=== Pattern: Convolution + Bias
+
+[source,mlir]
+----
+// Before fusion
+%0 = stablehlo.convolution(%arg0, %arg1) : tensor<1x32x32x64xf32>
+%1 = stablehlo.add %0, %arg2 : tensor<1x32x32x64xf32>
+----
+
+[source,mlir]
+----
+// After fusion
+%1 = stablehlo.convolution(%arg0, %arg1, %arg2) {bias = "true"} : tensor<1x32x32x64xf32>
+----
+
+Convolution + bias fusion is particularly impactful because the convolution output tensor can be large. Without fusion, the convolution writes to an intermediate buffer, then bias-add reads and writes it again. With fusion, the bias is applied inside the convolution's innermost loop.
+
+=== Why Fusion Matters for the NPU
+
+On the Coral NPU with 32 KB DTCM, intermediate tensors compete for space with input, output, and weight tensors. A fused `conv+bias+relu` uses _zero_ intermediate memory for those operations, freeing DTCM for larger input/output tensors.
+
+In the transpiled C code, fusion translates to combining loop bodies:
+
+[source,c]
+----
+// Without fusion: two loops, one intermediate array
+float intermediate[1024];  // steals 4 KB from DTCM
+for (int i = 0; i < 1024; i++)
+    intermediate[i] = conv_result;
+for (int i = 0; i < 1024; i++)
+    output[i] = max(intermediate[i] + bias, 0.0f);
+
+// With fusion: one loop, no intermediate
+for (int i = 0; i < 1024; i++)
+    output[i] = max(conv_result + bias, 0.0f);
+----
+
+== Pass 3: Dead Code Elimination (DCE)
+
+Removes operations whose results are never used by any subsequent operation or return statement.
+
+=== Before
+
+[source,mlir]
+----
+%0 = stablehlo.constant dense<1.0> : tensor<f32>
+%1 = stablehlo.constant dense<2.0> : tensor<f32>  <1>
+%2 = stablehlo.add %arg0, %0 : tensor<f32>
+return %2 : tensor<f32>
+----
+<1> `%1` is never used — it is dead code.
+
+=== After
+
+[source,mlir]
+----
+%0 = stablehlo.constant dense<1.0> : tensor<f32>
+%2 = stablehlo.add %arg0, %0 : tensor<f32>
+return %2 : tensor<f32>
+----
+
+=== When Does Dead Code Appear?
+
+Dead code typically appears after:
+
+- **Constant folding**: The original constant operands of a folded operation become dead
+- **Fusion**: The intermediate results of fused operations become dead
+- **Model pruning**: Removing a branch of the model makes its weight constants dead
+- **Graph transformations**: Replacing one subgraph with a more efficient equivalent
+
+== Using the Optimizer
+
+=== Kotlin API
+
+[source,kotlin]
+----
+// Default optimization
+val optimizer = StableHloOptimizer.createDefault()
+val optimizedModule = optimizer.optimize(module)
+
+// Aggressive optimization
+val aggressiveOptimizer = StableHloOptimizer.createAggressive()
+val optimizedModule = aggressiveOptimizer.optimize(module)
+
+// Custom pipeline
+val customOptimizer = StableHloOptimizer().apply {
+    addPass(ConstantFoldingPass())
+    addPass(OperationFusionPass())
+    addPass(DeadCodeEliminationPass())
+    addPass(ConstantFoldingPass())  // second pass
+}
+----
+
+=== Tracking Applied Optimizations
+
+[source,kotlin]
+----
+val optimizedModule = optimizer.optimize(module)
+val applied = optimizedModule.metadata["optimizations"] as List<String>
+// ["constant-folding", "operation-fusion", "dead-code-elimination"]
+----
+
+== Extending the Framework
+
+Custom optimization passes implement the `OptimizationPass` interface:
+
+[source,kotlin]
+----
+class MyCustomPass : OptimizationPass {
+    override val name: String = "my-custom-optimization"
+
+    override fun apply(module: StableHloModule): StableHloModule {
+        val parser = MlirParser()
+        val structure = parser.parse(module.content).getOrThrow()
+        val optimized = applyMyOptimization(structure.operations)
+        return module.copy(content = optimized.toMlirString())
+    }
+}
+----
+
+This design allows adding NPU-specific optimizations (e.g., tiling for DTCM, quantization, MAC-engine-aware operation scheduling) without modifying the core framework.

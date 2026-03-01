@@ -1,0 +1,226 @@
+= The Missing IREE Plugin
+:description: Analysis of the gap between Google's described Coral NPU compilation architecture (IREE with hardware plugin) and what is available in the open-source release. Documents the workaround via the Python transpiler.
+
+== What Google Describes
+
+Google's official documentation presents a complete, integrated compilation pipeline:
+
+[quote, Google Developers Blog — Introducing Coral NPU]
+____
+A model from a framework like JAX is first imported into the MLIR format using the StableHLO dialect. This intermediate file is then fed into the IREE compiler, which applies a hardware-specific plug-in to recognize the Coral NPU's architecture. From there, the compiler performs progressive lowering — a critical optimization step where the code is systematically translated through a series of dialects, moving closer to the machine's native language. After optimization, the toolchain generates a final, compact binary file ready for efficient execution on the edge device.
+____
+
+The intended pipeline:
+
+[mermaid]
+....
+flowchart TB
+    subgraph INTENDED ["Google's Intended Pipeline"]
+        JAX["JAX / PyTorch / TF"]
+        SHLO["StableHLO MLIR"]
+        IREE["IREE Compiler<br/>+ Coral NPU Plugin"]
+        LOWER["Progressive Lowering:<br/>StableHLO → linalg → loops → LLVM → RV32"]
+        CUSTOM["Custom MLIR Dialects<br/>for matrix/vector ops"]
+        BIN["Compact binary (.elf)"]
+        SIM2["Coral NPU Simulator"]
+    end
+
+    JAX --> SHLO --> IREE
+    IREE --> LOWER
+    IREE --> CUSTOM
+    LOWER --> BIN --> SIM2
+    CUSTOM --> BIN
+
+    style INTENDED fill:#e8f5e9,stroke:#2e7d32
+....
+
+== What Is Actually Available
+
+The open-source `coralnpu/` repository (released October 2025) contains *zero references to IREE*. The plugin described above does not exist in the release.
+
+What IS available:
+
+[cols="1,1"]
+|===
+|Available |Not Available
+
+|Chisel/Verilog hardware design
+|IREE Coral NPU plugin
+
+|Bazel cross-compilation toolchain
+|Custom MLIR dialects for matrix/vector ops
+
+|CRT startup code + linker scripts
+|Progressive lowering passes
+
+|MPACT behavioral simulator
+|StableHLO → bare-metal ELF compiler
+
+|Verilator cycle-accurate simulator
+|Any IREE integration whatsoever
+
+|Hand-written C examples
+|Automated model compilation
+|===
+
+== The Synaptics Torq Compiler
+
+The missing IREE plugin _does_ exist — but in a different project. The https://github.com/synaptics-torq/torq-compiler[Synaptics Torq compiler] is an IREE plugin that:
+
+- Registers a HAL target device and backend named `"torq"`
+- Defines custom MLIR dialects: `TorqHL` (high-level) and `TorqHW` (hardware-level)
+- Targets the **Synaptics SL2610 SoC** — the first commercial chip with a Coral NPU core
+
+[mermaid]
+....
+flowchart TB
+    subgraph TORQ ["Synaptics Torq Pipeline"]
+        INPUT["TOSA / Torch / ONNX / Linalg"]
+        THL["TorqHL Dialect<br/>(tensor-level ops)"]
+        THW["TorqHW Dialect<br/>(hardware-level ops)"]
+        CODEGEN["Codegen"]
+        SL2610["Binary for SL2610 SoC"]
+    end
+
+    INPUT --> THL --> THW --> CODEGEN --> SL2610
+
+    style TORQ fill:#fff3e0,stroke:#e65100
+....
+
+=== Why Can't We Use It Directly?
+
+The Torq compiler targets the SL2610's specific hardware configuration, not the generic open-source Coral NPU ISA. Differences include:
+
+- Different memory map (SL2610 has its own address space layout)
+- Different peripheral configuration
+- Different execution model (SL2610 has a host ARM core managing the NPU)
+
+Binaries produced by the Torq compiler are unlikely to run on the `coralnpu/` simulator without adaptation.
+
+== What Generic IREE Produces (Not Usable)
+
+The standard IREE compiler from PyPI _can_ compile StableHLO to RISC-V code. But the output is not compatible with the NPU's bare-metal execution model:
+
+[cols="1,2,1"]
+|===
+|IREE Output Mode |Result |Runs on NPU?
+
+|`--output-format=vm-bytecode`
+|`.vmfb` — FlatBuffer with RV32 code + VM orchestration
+|No — needs IREE runtime (~50 KB)
+
+|`--output-format=vm-c`
+|4600-line C requiring `iree/vm/api.h` and HAL layer
+|No — needs IREE runtime library
+
+|`--iree-llvmcpu-static-library-output-path`
+|Should produce `.o` + `.h` for static linking
+|Did not produce output for rv32
+|===
+
+The fundamental problem: IREE wraps every compiled model in a VM/HAL runtime that handles memory allocation, module loading, device management, and execution scheduling. This runtime is designed for systems with an OS. The Coral NPU has 8 KB of instruction memory and no OS.
+
+The RISC-V machine code _exists_ inside the VMFB, but it is not extractable as a standalone bare-metal binary.
+
+== The Workaround: Python Transpiler
+
+The `iree-tools/` directory contains a Python transpiler that bridges the gap:
+
+[mermaid]
+....
+flowchart TB
+    subgraph WORKAROUND ["Current Working Pipeline"]
+        MLIR["StableHLO MLIR<br/>(.mlir file)"]
+        PARSER["Python MLIR Parser<br/>(regex-based)"]
+        IR["IR Dataclasses<br/>Module, FuncDef, Ops"]
+        CGEN["C Code Generator<br/>(coralnpu conventions)"]
+        CC["Generated .cc"]
+        BAZEL["Bazel: coralnpu_v2_binary"]
+        ELF2["Bare-Metal ELF"]
+        MPACT["MPACT Simulator"]
+    end
+
+    MLIR --> PARSER --> IR --> CGEN --> CC --> BAZEL --> ELF2 --> MPACT
+
+    style WORKAROUND fill:#e1f5fe,stroke:#0277bd
+....
+
+=== Trade-offs
+
+What the transpiler provides::
+- Functional correctness: produces C code that computes the same result as the StableHLO specification
+- Minimal code size: generated C compiles to ~2 KB of machine code
+- Full compatibility with `coralnpu_v2_binary` Bazel conventions
+- Verified against IREE host execution (reference output matches simulator output)
+
+What the transpiler does NOT provide::
+- Hardware-specific optimizations (no MAC unit targeting, no stripmining, no SIMD intrinsics)
+- General convolution tiling (the generated loops are naive — no blocking for cache)
+- Quantization support (all computation is float32)
+- Auto-vectorization (relies on compiler `-O3` to use SIMD where possible)
+
+== Options to Close the Gap
+
+=== Option A: Adapt the Torq Compiler
+
+Retarget the Torq compiler's codegen to the generic Coral NPU ISA. This gives access to the custom MLIR dialects and progressive lowering passes that Google designed for the NPU.
+
+*Pro*: Most complete solution, uses Google's intended architecture. +
+*Con*: Significant adaptation effort, Torq targets SL2610-specific features.
+
+=== Option B: Direct MLIR Lowering (No IREE)
+
+Use the standard MLIR toolchain to lower StableHLO to LLVM IR to RISC-V object code:
+
+----
+mlir-opt (StableHLO → linalg → loops → LLVM dialect)
+  → mlir-translate (LLVM dialect → LLVM IR)
+  → llc (LLVM IR → riscv32 .o)
+  → link with CRT + linker script → .elf
+----
+
+*Pro*: Standard toolchain, no custom code. +
+*Con*: Need `mlir-opt` with StableHLO dialect support. I/O convention needs handling. Does not target matrix/vector units.
+
+=== Option C: SKaiNET Emits C Directly
+
+Skip MLIR entirely. Add a `--backend=coralnpu-c` to SKaiNET that emits C source matching `coralnpu_v2_binary` conventions directly from the computation graph.
+
+*Pro*: Simplest path, no MLIR parsing, works today. +
+*Con*: Bypasses MLIR, loses IREE interoperability and optimization ecosystem.
+
+=== Option D: Current Transpiler (What We Have)
+
+Continue using the Python regex-based transpiler. Extend it as needed to support more StableHLO operations.
+
+*Pro*: Works today, minimal dependencies, easy to extend. +
+*Con*: Limited to supported ops, no hardware-specific optimization, regex parsing is fragile.
+
+== What "Closing the Gap" Actually Means
+
+The gap is not just about producing a binary. It is about producing an _optimized_ binary that uses the NPU's specialized hardware:
+
+[cols="1,2"]
+|===
+|Feature |Status
+
+|Scalar execution (basic loops)
+|Working — the transpiler generates simple C loops that compile to scalar RV32 code
+
+|SIMD vectorization
+|Partial — relies on Clang `-O3` auto-vectorization, no explicit SIMD intrinsics
+
+|MAC engine (outer-product matmul)
+|Not used — the generated code uses scalar loops, not the 256-MACs/cycle engine
+
+|Quantized execution (int8/int16)
+|Not supported — all computation is float32
+
+|Memory tiling
+|Not implemented — generated code assumes all data fits in DTCM
+
+|Stripmining
+|Not used — no stripmine instruction generation
+|===
+
+A production-quality compiler would target the MAC engine for matrix multiplies, use SIMD for element-wise operations, tile computations to fit in DTCM, and quantize weights/activations. This is what the missing IREE plugin is designed to do.

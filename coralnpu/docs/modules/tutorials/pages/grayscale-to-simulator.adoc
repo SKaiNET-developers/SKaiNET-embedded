@@ -1,0 +1,329 @@
+= Tutorial: Grayscale Model to Simulator
+:description: End-to-end tutorial walking through defining an RGB-to-grayscale model in SKaiNET, exporting to StableHLO MLIR, transpiling to C, building a bare-metal RISC-V ELF, and running it on the Coral NPU simulator.
+
+== What You Will Build
+
+By the end of this tutorial, you will have:
+
+1. A StableHLO MLIR file defining an RGB-to-grayscale convolution
+2. A C source file generated from that MLIR
+3. A bare-metal RISC-V ELF binary
+4. Verified output from the Coral NPU simulator
+
+[mermaid]
+....
+flowchart LR
+    A["Define model<br/>(Kotlin or MLIR)"] --> B["Transpile<br/>MLIR → C"]
+    B --> C["Build<br/>ELF binary"]
+    C --> D["Simulate<br/>& verify"]
+
+    style A fill:#e1f5fe
+    style B fill:#fff3e0
+    style C fill:#e8f5e9
+    style D fill:#f3e5f5
+....
+
+== Prerequisites
+
+=== Required Tools
+
+[source,bash]
+----
+# Python environment manager (manages Python + dependencies)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Java version manager (for SKaiNET/Gradle)
+git clone https://github.com/jenv/jenv.git ~/.jenv
+echo 'export PATH="$HOME/.jenv/bin:$PATH"' >> ~/.zshrc
+echo 'eval "$(jenv init -)"' >> ~/.zshrc
+source ~/.zshrc
+
+# Install JDK 21 (Ubuntu/Debian)
+sudo apt install openjdk-21-jdk
+jenv add /usr/lib/jvm/java-21-openjdk-amd64
+
+# Bazel (via Bazelisk)
+npm install -g @aspect-bazel/bazelisk
+----
+
+=== Verify Setup
+
+[source,bash]
+----
+uv --version          # Should print uv version
+jenv versions         # Should show java-21
+java -version         # Should print 21.x
+bazel --version       # Should print 7.x
+----
+
+=== Repository Layout
+
+This tutorial assumes the following directory structure:
+
+----
+coral/
+├── SKaiNET/          # Kotlin DL framework
+├── iree-tools/       # MLIR → C transpiler
+└── coralnpu/         # NPU hardware + simulator
+----
+
+== Step 1: Understand the Model
+
+The RGB-to-grayscale model converts a color image to grayscale using the standard luminance formula:
+
+----
+gray = 0.299 × R + 0.587 × G + 0.114 × B
+----
+
+This is mathematically a 1×1 convolution with 3 input channels (RGB) and 1 output channel (grayscale). The kernel weights are the luminance coefficients `[0.299, 0.587, 0.114]`.
+
+=== Input/Output Tensors
+
+[cols="1,1,1"]
+|===
+|Tensor |Shape |Description
+
+|Input
+|`[1, 3, 4, 4]`
+|1 image, 3 channels (RGB), 4×4 pixels
+
+|Kernel
+|`[1, 3, 1, 1]`
+|1 output channel, 3 input channels, 1×1 spatial
+
+|Output
+|`[1, 1, 4, 4]`
+|1 image, 1 channel (gray), 4×4 pixels
+|===
+
+The layout is NCHW (batch, channel, height, width) — the standard for CNN operations.
+
+== Step 2: Examine the StableHLO MLIR
+
+The MLIR file is already available at `iree-tools/rgb2grayscale.mlir`:
+
+[source,bash]
+----
+cat iree-tools/rgb2grayscale.mlir
+----
+
+[source,mlir]
+----
+module {
+  func.func @rgb2grayscale(%arg0: tensor<1x3x4x4xf32>) -> (tensor<1x1x4x4xf32>) {
+    // Luminance weights: R=0.2989, G=0.587, B=0.114
+    %v0 = stablehlo.constant dense<[[[[0.2989]], [[0.587]], [[0.114]]]]>
+        : tensor<1x3x1x1xf32>
+
+    // 1x1 convolution: RGB → grayscale
+    %v1 = stablehlo.convolution(%arg0, %v0)
+        dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1],
+        window = {stride = [1, 1], pad = [[0, 0], [0, 0]], rhs_dilate = [1, 1]}
+        {batch_group_count = 1 : i64, feature_group_count = 1 : i64}
+        : (tensor<1x3x4x4xf32>, tensor<1x3x1x1xf32>) -> tensor<1x1x4x4xf32>
+
+    return %v1 : tensor<1x1x4x4xf32>
+  }
+}
+----
+
+Key points:
+
+- `%arg0` — function argument (the input image), provided at runtime
+- `%v0` — compile-time constant (the luminance weights)
+- `stablehlo.convolution` — high-level op specifying _what_ to compute, not _how_
+- `dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1]` — NCHW layout
+
+TIP: If you want to generate this MLIR from SKaiNET instead of using the pre-made file, see xref:howto:export-stablehlo.adoc[].
+
+== Step 3: Verify on Host (Reference Output)
+
+Before targeting the NPU, verify the MLIR is correct by running it on your host CPU using IREE:
+
+[source,bash]
+----
+cd iree-tools
+uv run python main.py verify rgb2grayscale.mlir
+----
+
+Expected output:
+
+----
+Compiling rgb2grayscale.mlir for host...
+Running rgb2grayscale on host...
+result[0]: 1x1x4x4xf32=[... floating point values ...]
+----
+
+This compiles the MLIR to a host-native VMFB using `iree-compile` and runs it using `iree-run-module`. The output serves as the _reference_ — the simulator output must match.
+
+NOTE: IREE fills function arguments with default values (zeros) when no input is provided. Zero input produces zero output for this model (0.299×0 + 0.587×0 + 0.114×0 = 0).
+
+== Step 4: Transpile MLIR to C
+
+Generate C source code from the MLIR:
+
+[source,bash]
+----
+uv run python main.py generate-c rgb2grayscale.mlir
+----
+
+Output:
+
+----
+Generated C source: out/rgb2grayscale.cc
+----
+
+Examine the generated code:
+
+[source,bash]
+----
+cat out/rgb2grayscale.cc
+----
+
+[source,c]
+----
+// Generated from StableHLO MLIR function @rgb2grayscale
+// f16 promoted to f32 (Coral NPU has hardware f32, no f16)
+
+float input_0[48] __attribute__((section(".data")));
+float output_0[16] __attribute__((section(".data")));
+
+static const float v0[3] = {0.2989f, 0.587f, 0.114f};
+
+int main() {
+  // 1x1 convolution: 3 input channels -> 1 output channels
+  for (int i = 0; i < 16; i++) {
+    float sum = 0.0f;
+    for (int c = 0; c < 3; c++) {
+      sum += input_0[c * 16 + i] * v0[c];
+    }
+    output_0[i] = sum;
+  }
+  return 0;
+}
+----
+
+Understand what happened:
+
+- `%arg0` (function argument) became `float input_0[48]` — 1×3×4×4 = 48 floats in DTCM
+- The return value became `float output_0[16]` — 1×1×4×4 = 16 floats in DTCM
+- The constant weights became `static const float v0[3]` — in ITCM (.rodata)
+- The 1×1 convolution became a simple 2-level loop nest (optimized from the general 7-level)
+- `+__attribute__((section(".data")))+` ensures placement in DTCM for simulator I/O
+
+== Step 5: Build the ELF Binary
+
+Build the bare-metal RISC-V ELF using Bazel:
+
+[source,bash]
+----
+uv run python main.py build-elf rgb2grayscale.mlir
+----
+
+Output:
+
+----
+Generated: ../coralnpu/examples/generated/rgb2grayscale/rgb2grayscale.cc
+Generated: ../coralnpu/examples/generated/rgb2grayscale/BUILD.bazel
+Building ELF...
+ELF: ../coralnpu/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+This does three things:
+
+1. Writes the generated `.cc` and a `BUILD.bazel` to `coralnpu/examples/generated/rgb2grayscale/`
+2. The `BUILD.bazel` uses the `coralnpu_v2_binary()` Bazel macro
+3. Invokes `bazel build` which cross-compiles with the RV32 Clang toolchain
+
+The resulting ELF contains:
+
+- `.text` section in ITCM (8 KB) — machine code + CRT startup
+- `.data` section in DTCM (32 KB) — `input_0` and `output_0` arrays
+- `.rodata` in ITCM — weight constants `v0`
+- Debug symbols: `input_0`, `output_0` (used by the simulator to find array addresses)
+
+== Step 6: Run on the Simulator
+
+Execute the ELF on the MPACT behavioral simulator:
+
+[source,bash]
+----
+uv run python main.py simulate \
+  ../coralnpu/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+Output:
+
+----
+output_0: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+Cycle count: 342
+----
+
+The output is all zeros because the simulator initialized `input_0` with zeros (default). The cycle count tells you how many clock cycles the program took.
+
+== Step 7: Run the Full Pipeline
+
+The `run-all` command executes steps 3-6 in sequence and compares host vs. simulator output:
+
+[source,bash]
+----
+uv run python main.py run-all rgb2grayscale.mlir
+----
+
+Output:
+
+----
+============================================================
+Step 1: Compile for host
+  -> out/rgb2grayscale_host.vmfb
+============================================================
+Step 2: Verify on host (reference output)
+result[0]: 1x1x4x4xf32=[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+============================================================
+Step 3: Generate C source
+  -> ../coralnpu/examples/generated/rgb2grayscale/rgb2grayscale.cc
+============================================================
+Step 4: Build ELF via Bazel
+  -> ../coralnpu/bazel-bin/.../coralnpu_v2_rgb2grayscale.elf
+============================================================
+Step 5: Run on MPACT simulator
+  output_0: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+  Cycle count: 342
+============================================================
+Step 6: Compare host vs simulator output
+  Host output (from iree-run-module):
+  result[0]: 1x1x4x4xf32=[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+  Simulator output:
+  output_0: [0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+----
+
+Both outputs match — the transpiler produces functionally correct code.
+
+== What You Learned
+
+[cols="1,2"]
+|===
+|Concept |Where It Happened
+
+|StableHLO as portable IR
+|The `.mlir` file works with both IREE (host verification) and the Python transpiler (NPU targeting)
+
+|Transpilation vs. compilation
+|The Python transpiler translates high-level ops to C loops (transpilation), then Bazel cross-compiles to machine code (compilation)
+
+|Bare-metal I/O convention
+|Input/output via global arrays with `__attribute__((section(".data")))`, accessed by symbol address
+
+|Convolution optimization
+|1×1 convolution with single output channel becomes a 2-loop nest instead of the general 7-loop
+
+|Memory constraints
+|48 input floats (192 B) + 16 output floats (64 B) + 3 weights (12 B) = 268 bytes total — fits easily in 32 KB DTCM
+|===
+
+== Next Steps
+
+- xref:howto:export-stablehlo.adoc[Export StableHLO from SKaiNET] — generate MLIR from Kotlin instead of using the pre-made file
+- xref:howto:optimize-hlo.adoc[Optimize StableHLO IR] — apply optimization passes before transpilation
+- xref:explanation:dsl-to-npu-pipeline.adoc[DSL to NPU Pipeline] — deep technical explanation of every transformation stage
+- xref:explanation:the-gap.adoc[The Missing IREE Plugin] — understand why the transpiler exists and what it cannot do

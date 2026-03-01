@@ -1,0 +1,207 @@
+= Architecture Overview
+:description: Full-stack architecture of the Coral NPU compilation pipeline — from Kotlin tensor DSL through StableHLO MLIR to bare-metal RISC-V execution on the NPU simulator.
+
+== The Three-Layer Stack
+
+The Coral NPU stack is split across three codebases that map to three distinct abstraction layers. Each layer has a single responsibility and communicates with the next through a well-defined artifact format.
+
+[mermaid]
+....
+graph TB
+    subgraph LANG ["Layer 1 — Model Definition (SKaiNET, Kotlin)"]
+        direction LR
+        DSL["Tensor DSL<br/><code>dag { }</code>"]
+        TAPE["Tape Recording<br/>trace execution"]
+        DAG["Compute Graph<br/>DAG analysis"]
+        CONV["StableHLO Converter<br/>type mapping"]
+        OPT["Optimizer<br/>const fold, fusion, DCE"]
+    end
+
+    subgraph TRANS ["Layer 2 — Transpilation (iree-tools, Python)"]
+        direction LR
+        PARSER["MLIR Parser<br/>regex-based"]
+        IR["IR Dataclasses<br/>Module, FuncDef, Op"]
+        CGEN["C Code Generator<br/>coralnpu conventions"]
+        BZEL["Bazel Builder<br/>write .cc + BUILD"]
+    end
+
+    subgraph HW ["Layer 3 — Hardware Target (coralnpu, Bazel/C)"]
+        direction LR
+        TOOL["RV32 Toolchain<br/>Clang cross-compile"]
+        CRT["CRT Startup<br/>coralnpu_start.S"]
+        LINK["Linker Script<br/>ITCM/DTCM/EXTMEM"]
+        SIM["MPACT Simulator<br/>behavioral execution"]
+    end
+
+    DSL --> TAPE --> DAG --> CONV --> OPT
+    OPT -->|".mlir file"| PARSER
+    PARSER --> IR --> CGEN --> BZEL
+    BZEL -->|".cc + BUILD.bazel"| TOOL
+    TOOL --> CRT --> LINK -->|".elf"| SIM
+
+    style LANG fill:#e1f5fe,stroke:#0277bd
+    style TRANS fill:#fff3e0,stroke:#e65100
+    style HW fill:#e8f5e9,stroke:#2e7d32
+....
+
+=== Why three layers?
+
+Each layer operates in a different language ecosystem with different constraints:
+
+Layer 1 (SKaiNET)::
+Kotlin Multiplatform targets JVM, Native, and WASM. Model authors work in type-safe Kotlin with IDE support. The compilation module exports standard StableHLO MLIR — the same IR that JAX, TensorFlow, and PyTorch/XLA produce. This means models defined in SKaiNET are interoperable with the broader MLIR ecosystem.
+
+Layer 2 (iree-tools)::
+Python handles the MLIR-to-C transpilation. This layer exists because the intended IREE Coral NPU plugin is xref:explanation:the-gap.adoc[not available in the open-source release]. The Python transpiler bridges the gap by parsing StableHLO text and emitting C source that follows the `coralnpu_v2_binary` Bazel conventions.
+
+Layer 3 (coralnpu)::
+Bazel manages the cross-compilation toolchain, linker scripts, CRT startup code, and simulator infrastructure. This is Google's open-source release — the hardware design itself in Chisel/Verilog, plus everything needed to compile and simulate bare-metal programs.
+
+== Data Flow: Model Definition to Simulation Result
+
+[mermaid]
+....
+sequenceDiagram
+    participant Author as Model Author
+    participant SKaiNET as SKaiNET (Kotlin)
+    participant MLIR as .mlir file
+    participant Tools as iree-tools (Python)
+    participant Bazel as coralnpu (Bazel)
+    participant Sim as MPACT Simulator
+
+    Author->>SKaiNET: Define model in dag { } DSL
+    SKaiNET->>SKaiNET: Tape-record execution<br/>Build computation graph
+    SKaiNET->>SKaiNET: Convert to StableHLO<br/>Apply optimization passes
+    SKaiNET->>MLIR: Export .mlir file
+
+    Author->>Tools: uv run python main.py run-all model.mlir
+    Tools->>Tools: Parse MLIR text (regex)
+    Tools->>Tools: Build IR dataclasses
+    Tools->>Tools: Generate C source code
+    Tools->>Bazel: Write .cc + BUILD.bazel<br/>to coralnpu/examples/generated/
+
+    Bazel->>Bazel: Cross-compile (Clang, rv32imf)
+    Bazel->>Bazel: Link with CRT + linker script
+    Bazel->>Sim: Load .elf binary
+
+    Sim->>Sim: Execute: _start → main() → ebreak
+    Sim->>Author: Read output arrays from memory
+....
+
+== The Artifact Chain
+
+Each layer produces a concrete artifact that the next layer consumes:
+
+[cols="1,2,1,2"]
+|===
+|Artifact |Format |Size (grayscale) |Contents
+
+|`.mlir`
+|StableHLO text
+|~500 bytes
+|`func.func @rgb2grayscale` with `stablehlo.convolution`, constants, types
+
+|`.cc`
+|C source
+|~800 bytes
+|`float input[]`, `float output[]`, nested loops, `__attribute__((section(".data")))`
+
+|`.elf`
+|RISC-V ELF
+|~8 KB
+|Machine code + CRT + BSS init + linker symbols (`input_0`, `output_0`)
+
+|Sim output
+|NumPy array
+|64 bytes
+|`float32[16]` — the grayscale pixel values read from DTCM
+|===
+
+== SKaiNET Internal Architecture
+
+SKaiNET is organized as a layer cake where each module depends only on layers below it:
+
+[mermaid]
+....
+graph TB
+    subgraph APP["Application Layer"]
+        CLI["skainet-kllama-cli<br/>--chat / --agent"]
+        GCLI["skainet-grayscale-cli"]
+    end
+
+    subgraph AGENT["Agentic AI Layer (orchestration, not ML)"]
+        AL["AgentLoop&lt;T&gt;"]
+        CT["ChatTemplate"]
+        TR["ToolRegistry"]
+    end
+
+    subgraph INFER["Inference Layer (ML forward pass)"]
+        LR["LlamaRuntime&lt;T&gt;"]
+        AB["AttentionBackend&lt;T&gt;"]
+        KV["KvCache"]
+    end
+
+    subgraph COMPILE["Compilation Layer"]
+        TAPE2["Tape Recording"]
+        DAG2["Graph Optimization"]
+        HLO2["StableHLO Lowering"]
+        C99["C99 Codegen"]
+    end
+
+    subgraph LANG["Tensor Primitives"]
+        TC["Tensor&lt;T,V&gt;, Shape, DType"]
+        NN["Embedding, Linear, RMSNorm"]
+    end
+
+    subgraph BACK["Backend"]
+        CPU["DirectCpuExecutionContext<br/>JDK 21 Vector API SIMD"]
+    end
+
+    CLI --> AL
+    GCLI --> HLO2
+    AL --> LR
+    LR --> AB --> KV
+    TAPE2 --> TC
+    DAG2 --> TAPE2
+    HLO2 --> DAG2
+    NN --> TC
+    TC --> CPU
+
+    style APP fill:#e1f5fe
+    style AGENT fill:#ffe0e0
+    style INFER fill:#e8f5e9
+    style COMPILE fill:#fff3e0
+    style LANG fill:#f3e5f5
+    style BACK fill:#e0e0e0
+....
+
+=== The ML vs. Orchestration Boundary
+
+A critical architectural insight: the agentic AI layer (`AgentLoop`, `ChatTemplate`, `ToolRegistry`) contains *zero trainable parameters*. It is pure control flow — deciding _when_ to call the model, not _what_ the model says. The boundary is the `InferenceRuntime<T>.forward()` method:
+
+- *Above* the boundary: chat formatting, tool call parsing, agent loop, JSON parsing — software engineering orchestration
+- *Below* the boundary: embedding lookup, RoPE attention, SiLU-gated FFN, RMSNorm, softmax sampling — deep learning math
+
+This separation means the same `LlamaRuntime<T>` powers both `--chat` (one-shot text completion) and `--agent` (autonomous multi-step reasoning) modes.
+
+== Design Decisions and Trade-offs
+
+=== Why StableHLO as the IR?
+
+StableHLO is the standard portable IR for ML computations. By exporting to StableHLO rather than a custom format, SKaiNET models can be:
+
+- Verified using standard IREE tooling (`iree-compile` + `iree-run-module` on host)
+- Consumed by any StableHLO-compatible compiler (XLA, IREE, custom backends)
+- Debugged using standard MLIR tools (`mlir-opt`, `mlir-translate`)
+
+The trade-off is that StableHLO is a high-level IR. It represents _what_ to compute (convolutions, element-wise ops) but not _how_ (tiling, vectorization, memory layout). The lowering from StableHLO to efficient bare-metal code is where the xref:explanation:the-gap.adoc[missing IREE plugin] matters.
+
+=== Why a Python transpiler instead of IREE?
+
+The IREE compiler _can_ compile StableHLO to RISC-V machine code, but it wraps the result in a VM/HAL runtime that requires ~50 KB of support code — far exceeding the NPU's 8 KB ITCM. The Python transpiler produces minimal C code that compiles to ~2 KB of machine code, fitting comfortably in tightly-constrained memory.
+
+See xref:explanation:the-gap.adoc[] for the full analysis.
+
+=== Why bare-metal C and not IREE VMFB?
+
+The Coral NPU runs a run-to-completion execution model with no OS, no interrupts, and no dynamic memory allocation. Programs start at `_start`, execute `main()`, and halt with `ebreak`. The IREE VM runtime assumes a host OS with memory allocation, file I/O, and thread support — none of which exist on the NPU.

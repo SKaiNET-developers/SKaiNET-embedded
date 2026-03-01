@@ -1,0 +1,289 @@
+= SKaiNET Module Map
+:description: Complete inventory of SKaiNET Kotlin Multiplatform modules, their dependencies, key types, and Gradle coordinates.
+
+== Module Overview
+
+[mermaid]
+....
+graph TB
+    subgraph APPS ["skainet-apps"]
+        KCLI["kllama-cli"]
+        KAGENT["kllama-agent"]
+        KLLAMA["kllama"]
+        GCLI["grayscale-cli"]
+        BERT["bert"]
+        GEMMA["kgemma"]
+        SINE["sine-approx-cli"]
+    end
+
+    subgraph IO ["skainet-io"]
+        GGUF["io-gguf"]
+        ST["io-safetensors"]
+        ONNX["io-onnx"]
+        IMG["io-image"]
+    end
+
+    subgraph COMPILE ["skainet-compile"]
+        CC["compile-core"]
+        CD["compile-dag"]
+        CHLO["compile-hlo"]
+        CCODE["compile-c"]
+        CJSON["compile-json"]
+    end
+
+    subgraph LANG ["skainet-lang"]
+        LC["lang-core"]
+        LD["lang-dag"]
+        LM["lang-models"]
+        LKSP["lang-ksp-annotations"]
+        LKPP["lang-ksp-processor"]
+    end
+
+    subgraph DATA ["skainet-data"]
+        DAPI["data-api"]
+        DSIMPLE["data-simple"]
+        DMEDIA["data-media"]
+        DTRANS["data-transform"]
+    end
+
+    subgraph BACK ["skainet-backends"]
+        CPU["backend-cpu"]
+    end
+
+    subgraph OTHER ["skainet-kan"]
+        KAN["kan"]
+    end
+
+    KCLI --> KAGENT --> KLLAMA
+    KLLAMA --> GGUF --> LC
+    GCLI --> CHLO
+    CC --> LC
+    CD --> CC
+    CHLO --> CD
+    LM --> LC
+    LD --> LC
+    LC --> CPU
+
+    style APPS fill:#e1f5fe
+    style IO fill:#fff3e0
+    style COMPILE fill:#f3e5f5
+    style LANG fill:#e8f5e9
+    style DATA fill:#ffebee
+    style BACK fill:#e0e0e0
+....
+
+== Tensor & NN Primitives (`skainet-lang`)
+
+=== `skainet-lang-core`
+
+The foundation module. All other modules depend on this.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-lang:skainet-lang-core`
+
+|Key Types
+|`Tensor<T, V>`, `Shape`, `Shape1D`..`Shape4D`, `DType`, `FP16`, `FP32`, `Int8`
+
+|Operations
+|`matmul`, `add`, `multiply`, `conv2d`, `relu`, `silu`, `softmax`, `transpose`, `reshape`
+
+|Platform
+|`commonMain` (multiplatform)
+|===
+
+=== `skainet-lang-dag`
+
+Graph DSL for defining DAG-structured models.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-lang:skainet-lang-dag`
+
+|Key Types
+|`DagBuilder`, `GraphProgram`, `ComputeGraph`, `GraphNode`, `ValidationResult`
+
+|DSL Entry
+|`dag { }` block
+|===
+
+=== `skainet-lang-models`
+
+Pre-built model components.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-lang:skainet-lang-models`
+
+|Models
+|`Embedding`, `Linear`, `RMSNormalization`, `Rgb2GrayScale`, `Rgb2GrayScaleMultiply`
+|===
+
+=== `skainet-lang-ksp-annotations` / `skainet-lang-ksp-processor`
+
+KSP (Kotlin Symbol Processing) for compile-time code generation.
+
+[cols="1,2"]
+|===
+|Annotations
+|`@GenerateTensorOp`, `@GenerateNetworkDsl`, `@GenerateGraphDsl`
+
+|Generated
+|DSL builder extensions, tape recording hooks, type inference code
+|===
+
+== Compilation (`skainet-compile`)
+
+=== `skainet-compile-core`
+
+Trace-based execution recording.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-compile:skainet-compile-core`
+
+|Key Types
+|`TapeRecorder`, recorded operation types
+|===
+
+=== `skainet-compile-dag`
+
+Graph optimization and DAG analysis.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-compile:skainet-compile-dag`
+
+|Key Types
+|`ComputeGraph`, topological sort, shape inference, validation
+|===
+
+=== `skainet-compile-hlo`
+
+StableHLO MLIR generation and optimization.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-compile:skainet-compile-hlo`
+
+|Key Types
+|`StableHloConverter`, `StableHloOptimizer`, `StableHloModule`, `TypeMapper`
+
+|Converters
+|`MathOperationsConverter`, `LinalgOperationsConverter`, `ActivationOperationsConverter`, `NeuralNetOperationsConverter`, `ConstantOperationsConverter`
+
+|Optimization Passes
+|`ConstantFoldingPass`, `DeadCodeEliminationPass`, `OperationFusionPass`
+|===
+
+=== `skainet-compile-c`
+
+C99 code generation for Arduino/embedded targets.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-compile:skainet-compile-c`
+
+|Output
+|C99 source with Arduino library conventions
+|===
+
+== Model I/O (`skainet-io`)
+
+=== `skainet-io-gguf`
+
+GGUF model format support (LLaMA, Gemma).
+
+[cols="1,2"]
+|===
+|Key Types
+|`LlamaWeightLoader`, `LlamaRuntimeWeights<T>`, `GGUFReader`
+|===
+
+=== `skainet-io-safetensors`
+
+SafeTensors format support.
+
+=== `skainet-io-onnx`
+
+ONNX model import.
+
+=== `skainet-io-image`
+
+Image loading and saving (JPEG, PNG, BMP, GIF).
+
+== Backend Execution (`skainet-backends`)
+
+=== `skainet-backend-cpu`
+
+Direct CPU execution using JDK 21 Vector API for SIMD.
+
+[cols="1,2"]
+|===
+|Gradle |`:skainet-backends:skainet-backend-cpu`
+
+|Key Types
+|`DirectCpuExecutionContext`, `DefaultCpuOps`
+
+|JVM Requirement
+|JDK 21+ with `--add-modules jdk.incubator.vector`
+|===
+
+== Applications (`skainet-apps`)
+
+[cols="2,3"]
+|===
+|Application |Purpose
+
+|`skainet-kllama-cli`
+|LLaMA inference CLI: `--chat` or `--agent` modes
+
+|`skainet-kllama-agent`
+|Agentic AI: `AgentLoop<T>`, `ChatTemplate`, `ToolRegistry`, `ToolCallParser`
+
+|`skainet-kllama`
+|LLaMA runtime: `LlamaRuntime<T>`, `AttentionBackend<T>`, `KvCache`
+
+|`skainet-grayscale-cli`
+|RGB→Grayscale image CLI with GPU/CPU fallback
+
+|`skainet-bert`
+|BERT inference
+
+|`skainet-kgemma`
+|Gemma LLM runtime
+
+|`skainet-sine-approx-cli`
+|Sine approximation demo
+|===
+
+== Build Configuration
+
+[cols="1,2"]
+|===
+|Property |Value
+
+|Build tool
+|Gradle 8.13
+
+|Kotlin version
+|2.2.21
+
+|JVM target
+|Java 21 (enforced via toolchain)
+
+|Maven group
+|`sk.ainet`
+
+|Kotlin targets
+|JVM, Native, WASM (module-dependent)
+
+|Testing
+|Kotest (property testing, BDD)
+
+|Coverage
+|Kover
+
+|Documentation
+|Dokka
+|===

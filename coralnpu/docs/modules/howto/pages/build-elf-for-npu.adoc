@@ -1,0 +1,158 @@
+= How to Build an ELF for the NPU
+:description: Cross-compile generated C source code to a bare-metal RISC-V ELF binary using the coralnpu Bazel toolchain.
+
+== Prerequisites
+
+- Bazel 7.4.1+ (via Bazelisk)
+- `uv` installed
+- The `coralnpu/` repository at `../coralnpu` relative to `iree-tools/`
+
+== One-Step Build
+
+The `build-elf` command generates C, writes `BUILD.bazel`, and invokes Bazel:
+
+[source,bash]
+----
+cd iree-tools
+uv run python main.py build-elf rgb2grayscale.mlir
+----
+
+Output:
+
+----
+Generated: ../coralnpu/examples/generated/rgb2grayscale/rgb2grayscale.cc
+Generated: ../coralnpu/examples/generated/rgb2grayscale/BUILD.bazel
+Building ELF...
+ELF: ../coralnpu/bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+== Manual Build (Step by Step)
+
+=== 1. Generate C Source
+
+[source,bash]
+----
+uv run python main.py generate-c rgb2grayscale.mlir -o \
+  ../coralnpu/examples/generated/rgb2grayscale/rgb2grayscale.cc
+----
+
+=== 2. Write BUILD.bazel
+
+Create `../coralnpu/examples/generated/rgb2grayscale/BUILD.bazel`:
+
+[source,python]
+----
+load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
+
+coralnpu_v2_binary(
+    name = "rgb2grayscale",
+    srcs = ["rgb2grayscale.cc"],
+)
+----
+
+=== 3. Build with Bazel
+
+[source,bash]
+----
+cd ../coralnpu
+bazel build //examples/generated/rgb2grayscale:rgb2grayscale
+----
+
+The output ELF is at:
+
+----
+bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+----
+
+== What the Build Does
+
+[mermaid]
+....
+flowchart LR
+    CC[".cc source"] --> CLANG["Clang rv32imf<br/>-O3 -nostdlib"]
+    CRT["coralnpu_start.S"] --> CLANG
+    NEWLIB["newlib-nano"] --> CLANG
+    LD["coralnpu_tcm.ld"] --> CLANG
+    CLANG --> ELF[".elf"]
+    CLANG --> BIN[".bin"]
+    CLANG --> VMEM[".vmem"]
+....
+
+The `coralnpu_v2_binary` Bazel macro:
+
+1. Applies platform transition to `//platforms:coralnpu_v2` (bare-metal)
+2. Cross-compiles with Clang: `-march=rv32imf_zve32x_zicsr_zifencei_zbb -O3 -nostdlib`
+3. Links with CRT startup (`coralnpu_start.S`), newlib-nano, and linker script
+4. Produces `.elf` (with debug symbols), `.bin` (raw binary), and `.vmem` (Verilog memory init)
+
+== Compiler Flags
+
+[cols="1,2"]
+|===
+|Flag |Purpose
+
+|`-march=rv32imf_zve32x...`
+|Target the Coral NPU ISA exactly
+
+|`-mabi=ilp32`
+|32-bit integers, longs, and pointers
+
+|`-O3`
+|Aggressive optimization (auto-vectorization, inlining)
+
+|`-nostdlib`
+|No standard library startup — CRT handles this
+
+|`-mcmodel=medany`
+|Medium-any code model for bare-metal
+|===
+
+== Inspect the ELF
+
+[source,bash]
+----
+# Check sections and sizes
+riscv32-unknown-elf-size \
+  bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf
+
+# List symbols (find input_0, output_0 addresses)
+riscv32-unknown-elf-nm \
+  bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf | \
+  grep -E 'input_|output_'
+
+# Disassemble
+riscv32-unknown-elf-objdump -d \
+  bazel-bin/examples/generated/rgb2grayscale/coralnpu_v2_rgb2grayscale.elf | head -50
+----
+
+== Common Issues
+
+=== "ITCM overflow"
+
+The `.text` + `.rodata` sections exceed 8 KB. Solutions:
+
+- Reduce model complexity (fewer operations)
+- Use `-Os` instead of `-O3` (optimize for size)
+- Move large constants to EXTMEM
+
+=== "DTCM overflow"
+
+The `.data` + `.bss` + heap + stack exceed 32 KB. Solutions:
+
+- Reduce tensor sizes (smaller spatial dimensions)
+- Tile the computation to process subregions
+- Place overflow data in EXTMEM (`.extdata` section)
+
+=== Bazel platform errors
+
+Ensure you're building from the `coralnpu/` root, not a subdirectory:
+
+[source,bash]
+----
+cd coralnpu  # must be the workspace root
+bazel build //examples/generated/rgb2grayscale:rgb2grayscale
+----
+
+== Next Steps
+
+- xref:howto:run-on-simulator.adoc[] — execute the ELF on the MPACT simulator

@@ -1,0 +1,314 @@
+= Bazel Build Rules Reference
+:description: Reference for the coralnpu Bazel build system — the coralnpu_v2_binary macro, platform constraints, toolchain configuration, and simulator targets.
+
+== `coralnpu_v2_binary`
+
+The primary build rule for compiling C/C++ to a bare-metal Coral NPU binary.
+
+=== Location
+
+[source]
+----
+rules/coralnpu_v2.bzl
+----
+
+=== Usage
+
+[source,python]
+----
+load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
+
+coralnpu_v2_binary(
+    name = "my_program",
+    srcs = ["my_program.cc"],
+)
+----
+
+=== Outputs
+
+[cols="1,2"]
+|===
+|File |Description
+
+|`coralnpu_v2_<name>.elf`
+|RISC-V ELF with debug symbols. Primary output for simulator.
+
+|`coralnpu_v2_<name>.bin`
+|Raw binary (stripped, no ELF headers). For hardware flash.
+
+|`coralnpu_v2_<name>.vmem`
+|Verilog `$readmemh` format. For Verilator testbenches.
+|===
+
+=== What It Does
+
+1. Applies platform transition to `//platforms:coralnpu_v2`
+2. Compiles sources with the RV32 Clang cross-compiler
+3. Links with CRT startup (`coralnpu_start.S`), newlib-nano, and linker script
+4. Produces `.elf`, `.bin`, and `.vmem` outputs
+
+== Platform Constraints
+
+=== `//platforms:coralnpu_v2`
+
+Bare-metal platform for standard programs.
+
+[source,python]
+----
+platform(
+    name = "coralnpu_v2",
+    constraint_values = [
+        "@platforms//cpu:riscv32",
+        "@platforms//os:none",       # bare-metal
+        "//toolchain:coralnpu_v2",
+    ],
+)
+----
+
+=== `//platforms:coralnpu_v2_semihosting`
+
+Platform with semihosting support (printf via simulator).
+
+== Toolchain Configuration
+
+=== Location
+
+[source]
+----
+toolchain/cc_toolchain_config.bzl
+----
+
+=== Compiler Flags
+
+[cols="1,2"]
+|===
+|Flag |Purpose
+
+|`-target riscv32-unknown-elf`
+|Cross-compile target triple
+
+|`-march=rv32imf_zve32x_zicsr_zifencei_zbb`
+|Target the full Coral NPU ISA
+
+|`-mabi=ilp32`
+|32-bit integers, longs, pointers
+
+|`-mcmodel=medany`
+|Medium-any code model
+
+|`-O3`
+|Aggressive optimization
+
+|`-nostdlib`
+|No standard library startup
+
+|`-fno-exceptions`
+|No C++ exceptions (saves code size)
+
+|`-fno-rtti`
+|No C++ RTTI (saves code size)
+|===
+
+=== Linker Flags
+
+[cols="1,2"]
+|===
+|Flag |Purpose
+
+|`-T coralnpu_tcm.ld`
+|Use the TCM linker script
+
+|`-lc -lm -lstdc++ -lgcc`
+|Link newlib-nano libraries
+
+|`-nostartfiles`
+|Use custom CRT (`coralnpu_start.S`)
+|===
+
+== CRT Startup
+
+=== Location
+
+[source]
+----
+toolchain/crt/coralnpu_start.S
+----
+
+=== Startup Sequence
+
+[cols="1,2"]
+|===
+|Step |Action
+
+|1
+|Load stack pointer from `_stack_top` linker symbol
+
+|2
+|Load global pointer from `__global_pointer$`
+
+|3
+|Zero `.bss` section (`_bss_start` to `_bss_end`)
+
+|4
+|Run C++ static constructors (`.init_array`)
+
+|5
+|Set `mtvec` CSR (exception handler)
+
+|6
+|Enable FP extension in `mstatus` (set FS bits)
+
+|7
+|Enable Vector extension in `mstatus` (set VS bits)
+
+|8
+|Write sentinel `0x0badd00d` to `_ret` symbol
+
+|9
+|Call `main(0, 0)`
+
+|10
+|Store return value of `main()` at `_ret`
+
+|11
+|Run C++ static destructors (`.fini_array`)
+
+|12
+|Execute `ebreak` to halt the simulator
+
+|13
+|Read cycle counters (`mcycle`, `mcycleh`)
+
+|14
+|Execute `mpause` and enter infinite loop
+|===
+
+=== Gloss (Newlib Stubs)
+
+Location: `toolchain/crt/coralnpu_gloss.cc`
+
+[cols="1,2"]
+|===
+|Stub |Behavior
+
+|`_write(fd, buf, len)`
+|Returns `len` (no actual I/O)
+
+|`_sbrk(incr)`
+|Bumps heap pointer from `_heap_start`
+
+|`_exit(status)`
+|Infinite loop
+
+|`_close`, `_lseek`, `_read`, `_fstat`, `_isatty`
+|Return error codes (no filesystem)
+|===
+
+== Linker Script
+
+=== Location
+
+[source]
+----
+toolchain/coralnpu_tcm.ld.tpl        (template)
+rules/linker.bzl                     (generate_linker_script rule)
+----
+
+=== Memory Regions
+
+[source]
+----
+MEMORY {
+  ITCM  (rx)  : ORIGIN = 0x00000000, LENGTH = 8K
+  DTCM  (rwx) : ORIGIN = 0x00010000, LENGTH = 32K
+  EXTMEM (rwx) : ORIGIN = 0x20000000, LENGTH = 4M
+}
+----
+
+=== Section Placement
+
+[source]
+----
+SECTIONS {
+  .text     > ITCM
+  .rodata   > ITCM
+  .data     > DTCM
+  .bss      > DTCM
+  .heap     > DTCM
+  .stack    > DTCM
+  .extdata  > EXTMEM
+  .extbss   > EXTMEM
+}
+----
+
+== Simulator Targets
+
+=== MPACT Behavioral Simulator
+
+[source,bash]
+----
+# Build
+bazel build //sim:coralnpu_v2_sim
+
+# Run
+bazel run //sim:coralnpu_v2_sim -- path/to/program.elf
+
+# Interactive mode
+bazel run //sim:coralnpu_v2_sim -- --i path/to/program.elf
+----
+
+=== Verilator Cycle-Accurate Simulator
+
+[source,bash]
+----
+# Build
+bazel build //tests/verilator_sim:rvv_core_mini_axi_sim
+
+# Run
+bazel-bin/tests/verilator_sim/rvv_core_mini_axi_sim --binary path/to/program.elf
+----
+
+=== Python Simulator API
+
+[source,bash]
+----
+# Build the pybind module
+bazel build //sw/coralnpu_sim:coralnpu_v2_sim_pybind
+
+# The .so is at:
+# bazel-bin/sw/coralnpu_sim/coralnpu_v2_sim_pybind.so
+----
+
+== Key Build Files
+
+[cols="1,2"]
+|===
+|Path |Purpose
+
+|`BUILD.bazel` (root)
+|Workspace-level build rules
+
+|`rules/coralnpu_v2.bzl`
+|`coralnpu_v2_binary()` macro definition
+
+|`rules/linker.bzl`
+|`generate_linker_script()` rule
+
+|`toolchain/cc_toolchain_config.bzl`
+|Cross-compiler configuration
+
+|`toolchain/BUILD.bazel`
+|Toolchain registration
+
+|`platforms/BUILD.bazel`
+|Platform constraint definitions
+
+|`examples/BUILD.bazel`
+|Example program build targets
+
+|`sim/BUILD.bazel`
+|MPACT simulator build target
+
+|`tests/verilator_sim/BUILD.bazel`
+|Verilator simulator build target
+|===

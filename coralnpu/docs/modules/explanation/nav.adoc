@@ -1,0 +1,7 @@
+* Explanation
+** xref:explanation:architecture-overview.adoc[Architecture Overview]
+** xref:explanation:dsl-to-npu-pipeline.adoc[DSL to NPU Pipeline]
+** xref:explanation:coral-npu-hardware.adoc[Coral NPU Hardware]
+** xref:explanation:skainet-compilation.adoc[SKaiNET Compilation Layer]
+** xref:explanation:the-gap.adoc[The Missing IREE Plugin]
+** xref:explanation:optimization-passes.adoc[Optimization Passes]

@@ -1,0 +1,236 @@
+= Coral NPU Hardware Architecture
+:description: Technical explanation of Google Coral NPU's RISC-V based architecture, including the scalar core, vector/SIMD engine, MAC unit, memory hierarchy, and execution model.
+
+== Design Philosophy
+
+The Coral NPU is not a general-purpose CPU with ML acceleration bolted on. It is an ML accelerator with enough scalar capability to run control flow. The design starts from domain-specific matrix operations and adds just enough RISC-V scalar + vector capability to avoid needing a separate host processor.
+
+[mermaid]
+....
+graph TB
+    subgraph CORE ["Coral NPU Core"]
+        subgraph SCALAR ["Scalar Frontend"]
+            FETCH["Fetch<br/>backward-taken prediction"]
+            DECODE["Decode<br/>4-way dispatch"]
+            EXEC["Execute<br/>rv32imf"]
+        end
+
+        subgraph VECTOR ["Vector/SIMD Backend"]
+            FIFO["Command FIFO<br/>(decoupled from scalar)"]
+            VALU["Vector ALU<br/>128-bit SIMD"]
+            MAC["MAC Engine<br/>8×8 outer product<br/>256 MACs/cycle"]
+            VRF["Vector Regfile<br/>v0..v63 × 256-bit"]
+            ACC["Accumulator<br/>8×8 × 32-bit"]
+        end
+
+        subgraph MEM ["Memory Hierarchy"]
+            L1I["L1 I-Cache<br/>8KB, 4-way"]
+            L1D["L1 D-Cache<br/>16KB, 4-way, dual-bank"]
+            ITCM2["ITCM<br/>8KB"]
+            DTCM2["DTCM<br/>32KB"]
+            EXTMEM["EXTMEM<br/>4MB"]
+        end
+    end
+
+    FETCH --> DECODE --> EXEC
+    DECODE -->|"vector instrs"| FIFO
+    FIFO --> VALU
+    FIFO --> MAC
+    VALU --> VRF
+    MAC --> ACC
+    EXEC --> L1D
+    FETCH --> L1I
+    L1I --> ITCM2
+    L1D --> DTCM2
+    DTCM2 --> EXTMEM
+
+    style SCALAR fill:#e1f5fe
+    style VECTOR fill:#e8f5e9
+    style MEM fill:#fff3e0
+....
+
+== ISA: `rv32imf_zve32x_zicsr_zifencei_zbb`
+
+The ISA string encodes exactly what instructions the hardware supports:
+
+[cols="1,3"]
+|===
+|Extension |Purpose
+
+|`rv32i`
+|Base 32-bit integer instructions (ALU, load/store, branches)
+
+|`m`
+|Hardware integer multiply/divide — needed for address calculations in tiled loops
+
+|`f`
+|Single-precision hardware float (FP32) — the NPU's native compute precision. No f16 hardware support; f16 values must be promoted to f32
+
+|`zve32x`
+|128-bit SIMD vector extension — processes 4×f32 or 8×i16 or 16×i8 per instruction
+
+|`zicsr`
+|Control/status registers — enables reading cycle counters, configuring vector/float enables
+
+|`zifencei`
+|Instruction-fetch fence — needed for self-modifying code and cache coherency
+
+|`zbb`
+|Bit manipulation — `clz`, `ctz`, `popcount`, `min/max`, `rotate` — used in address generation and loop control
+|===
+
+The C extension encoding space is _reclaimed_ (per the RISC-V spec's provision for this) to provide 6-bit vector register indices (supporting 64 vector registers v0..v63) and flexible type encodings for SIMD instructions.
+
+== Scalar Core
+
+The scalar core is a 4-stage in-order pipeline:
+
+. **Fetch**: Reads instructions from L1 I-Cache. Branch prediction is static — backward branches are predicted taken (loops), forward branches predicted not-taken. Misprediction costs 1 cycle.
+
+. **Decode**: 4-way dispatch — scalar instructions go to the scalar execute unit, vector/SIMD instructions are posted to the command FIFO. The scalar core can dispatch up to 4 instructions per cycle when there are no data hazards.
+
+. **Execute**: ALU, FPU, load/store. The scalar core handles all control flow, address calculations, and loop iteration. It is deliberately simple — no speculation, no out-of-order execution.
+
+. **Writeback**: Results written to the 31 scalar registers (x1..x31, x0 is hardwired zero).
+
+The scalar core is designed to be _small_ — it is overhead that steals area and power from the ML backend. Its job is to feed the vector/MAC units with work as efficiently as possible.
+
+== Vector/SIMD Engine
+
+The vector core is decoupled from the scalar frontend via a FIFO. This means the scalar core can run ahead, queuing vector instructions, while the vector engine processes them independently.
+
+=== Registers
+
+[cols="1,1,2"]
+|===
+|Register Bank |Count × Width |Usage
+
+|Vector registers
+|64 × 256-bit
+|v0..v63. Each holds 8×i32, 16×i16, or 32×i8. Used for SIMD ALU ops and MAC input staging.
+
+|Accumulator
+|8×8 × 32-bit
+|2D accumulator array for the MAC engine. Holds partial sums during outer-product matrix multiplies.
+|===
+
+=== Stripmining
+
+To reduce instruction dispatch pressure, SIMD instructions include an implicit stripmine mechanism. A single `vadd v0` instruction in the dispatch stage expands into four serialized issue events:
+
+----
+vadd v0 → vadd v0 : vadd v1 : vadd v2 : vadd v3
+----
+
+This provides 4× throughput from a single dispatch slot, supporting instruction-level tiling patterns through consecutive vector registers.
+
+== MAC Engine (Matrix Multiply Unit)
+
+The MAC engine is the core ML accelerator. It implements an _outer-product_ multiply-accumulate, which maximizes compute density relative to memory bandwidth:
+
+[mermaid]
+....
+flowchart LR
+    subgraph INPUTS ["Input Staging"]
+        W["Weights (wide broadcast)<br/>parallel across 8 lanes"]
+        A["Activations (narrow shift)<br/>batched across 8 lanes"]
+    end
+
+    subgraph MAC2 ["Outer Product Engine"]
+        VDOT["8 × VDOT units<br/>4× int8 multiply → int32 accumulate"]
+        ACC2["8×8 Accumulator Array<br/>256 MACs/cycle"]
+    end
+
+    W --> VDOT
+    A --> VDOT
+    VDOT --> ACC2
+....
+
+=== Why Outer Product?
+
+An outer-product engine provides two-dimensional broadcast structures:
+
+- **Wide axis** (parallel broadcast): convolution weights are broadcast to all compute lanes simultaneously
+- **Narrow axis** (transposed, shifted): input activations from multiple spatial positions (or batches) feed different lanes
+
+This means the MAC engine computes an 8×8 tile of the output matrix per cycle, performing 256 multiply-accumulate operations with only 16 memory reads (8 weights + 8 activations). This is a 16:1 compute-to-memory ratio.
+
+The `VDOT` operation performs 4 int8 multiplies accumulated into a 32-bit result — the fundamental operation for quantized neural networks.
+
+== Memory Hierarchy
+
+[mermaid]
+....
+graph LR
+    subgraph ON_CHIP ["On-Chip (fast, small)"]
+        ITCM3["ITCM 8KB<br/>0x00000000<br/>.text, .rodata"]
+        DTCM3["DTCM 32KB<br/>0x00010000<br/>.data, .bss, heap, stack"]
+    end
+
+    subgraph CACHE ["Cache Layer"]
+        L1I2["L1 I-Cache 8KB<br/>4-way, 256B blocks"]
+        L1D2["L1 D-Cache 16KB<br/>4-way, dual-bank<br/>alignment buffer"]
+    end
+
+    subgraph OFF_CHIP ["Off-Chip (slow, larger)"]
+        EXT["EXTMEM 4MB<br/>0x20000000<br/>.extdata, .extbss"]
+    end
+
+    L1I2 --> ITCM3
+    L1D2 --> DTCM3
+    DTCM3 -.->|"overflow"| EXT
+
+    style ON_CHIP fill:#e8f5e9
+    style CACHE fill:#fff3e0
+    style OFF_CHIP fill:#ffebee
+....
+
+=== Memory Constraints for Model Deployment
+
+The memory sizes impose hard constraints on what models can run:
+
+[cols="1,1,2"]
+|===
+|Memory |Size |Practical Limit
+
+|ITCM
+|8 KB
+|~2000 instructions. The generated code for RGB-to-grayscale is ~200 instructions. Complex models with many distinct operations may not fit.
+
+|DTCM
+|32 KB
+|~8000 float32 values. A 4×4 RGB image (48 floats = 192 bytes) fits easily. A 224×224 RGB image (150,528 floats = 602 KB) does NOT fit — requires tiling or EXTMEM.
+
+|EXTMEM
+|4 MB
+|Usable for larger tensors but at higher latency. The linker script places `.extdata` and `.extbss` here when DTCM overflows.
+|===
+
+For real-world model deployment, this means:
+
+- Weights must be quantized (int8 uses 4× less memory than float32)
+- Activations must be tiled (process a spatial region at a time, not the whole tensor)
+- Models must be architecture-aware (MobileNet-style depthwise separable convolutions are preferred over standard convolutions)
+
+== Execution Model
+
+The NPU runs a _run-to-completion_ model:
+
+1. No operating system — bare-metal execution
+2. No interrupts — the program runs until `ebreak`
+3. No dynamic memory allocation — all arrays are statically sized at compile time
+4. No I/O syscalls — data is passed via shared memory (the simulator writes to symbol addresses)
+
+This simplicity is deliberate. An ML inference workload has a fixed, known computation graph. There is no need for OS-level scheduling, virtual memory, or interrupt handling. Removing these features saves area, power, and latency.
+
+== Simulators
+
+Two simulators are available for testing without physical hardware:
+
+MPACT Behavioral Simulator::
+Fast, symbolic execution. Runs programs in milliseconds. Provides cycle counts and memory access traces. Used for functional verification and rapid iteration. Python API available for scripted testing.
+
+Verilator Cycle-Accurate Simulator::
+Slow but cycle-accurate. Simulates the actual Verilog/Chisel hardware design. Used for timing analysis and hardware/software co-design. Execution takes minutes to hours depending on program complexity.
+
+Both accept ELF binaries. The MPACT simulator is the standard development tool; Verilator is used for final hardware validation.

@@ -1,0 +1,225 @@
+= SKaiNET Compilation Layer
+:description: How SKaiNET transforms Kotlin tensor operations into StableHLO MLIR through tape recording, graph construction, type mapping, and optimization passes.
+
+== Overview
+
+The SKaiNET compilation layer (`skainet-compile-*` modules) takes tensor operations defined in Kotlin and produces StableHLO MLIR — the standard portable IR for ML computations. This is a _trace-based_ compilation approach, similar to JAX's tracing or PyTorch 2.0's `torch.compile`.
+
+[mermaid]
+....
+flowchart TB
+    subgraph CORE ["skainet-compile-core"]
+        TAPE["TapeRecorder<br/>Records every tensor op"]
+        OPS["Recorded Ops<br/>constant, conv, matmul, add, ..."]
+    end
+
+    subgraph DAG_MOD ["skainet-compile-dag"]
+        DAG["ComputeGraph<br/>DAG construction"]
+        TOPO["Topological Sort"]
+        SHAPE["Shape Inference"]
+        VALID["Validation"]
+    end
+
+    subgraph HLO_MOD ["skainet-compile-hlo"]
+        CONV["StableHloConverter<br/>Op → StableHLO text"]
+        TYPE["TypeMapper<br/>Kotlin types → MLIR types"]
+        OPT["StableHloOptimizer<br/>const fold, fusion, DCE"]
+    end
+
+    subgraph C_MOD ["skainet-compile-c"]
+        CGEN["C99 Code Generator<br/>Arduino library export"]
+    end
+
+    TAPE --> OPS
+    OPS --> DAG --> TOPO --> SHAPE --> VALID
+    VALID --> CONV
+    TYPE --> CONV
+    CONV --> OPT
+    OPT -->|".mlir"| OUTPUT["StableHLO MLIR"]
+    VALID --> CGEN -->|".c/.h"| COUT["C99 Source"]
+
+    style CORE fill:#e1f5fe
+    style DAG_MOD fill:#fff3e0
+    style HLO_MOD fill:#f3e5f5
+    style C_MOD fill:#e8f5e9
+....
+
+== Tape Recording (Trace-Based Compilation)
+
+When you execute a model function like `rgb2GrayScaleMatMul()`, the tensor operations don't compute values immediately. Instead, they record themselves onto a _tape_ — a linear log of operations with their operands and result types.
+
+=== How It Works
+
+[source,kotlin]
+----
+// This Kotlin code...
+val weights = constant(floatArrayOf(0.299f, 0.587f, 0.114f), Shape1D(3))
+val result = input.convolution(weights, stride=1, padding=0)
+----
+
+...produces this tape:
+
+----
+Op #0: ConstantOp(values=[0.299, 0.587, 0.114], shape=[3], dtype=f32)
+Op #1: ConvolutionOp(lhs=#input, rhs=#0, stride=[1,1], padding=[[0,0],[0,0]])
+----
+
+=== Why Trace Instead of Eager?
+
+Eager execution (computing values immediately) prevents optimization across operations. Trace-based compilation captures the full computation graph _before_ execution, enabling:
+
+- **Constant folding**: If two constants are added, compute the result at compile time
+- **Operation fusion**: Combine `conv + bias + relu` into a single fused kernel
+- **Dead code elimination**: Remove operations whose results are never used
+- **Memory planning**: Know all tensor sizes upfront, enabling optimal memory layout
+
+The trade-off is that trace-based compilation cannot handle data-dependent control flow (if/else based on tensor values). For ML inference, this is rarely a limitation — the computation graph is fixed at model load time.
+
+== Graph Construction (DAG Analysis)
+
+The `skainet-compile-dag` module converts the linear tape into a DAG (directed acyclic graph). Each operation becomes a node; data dependencies become edges.
+
+For the grayscale model, the DAG is trivial:
+
+[mermaid]
+....
+graph TB
+    INPUT["input<br/>tensor&lt;1×3×4×4×f32&gt;"]
+    CONST["constant<br/>[0.299, 0.587, 0.114]<br/>tensor&lt;1×3×1×1×f32&gt;"]
+    CONV["convolution<br/>1×1, stride=1, pad=0"]
+    OUTPUT["output<br/>tensor&lt;1×1×4×4×f32&gt;"]
+
+    INPUT --> CONV
+    CONST --> CONV
+    CONV --> OUTPUT
+....
+
+For complex models (ResNets, YOLO heads), the DAG captures skip connections, multi-scale outputs, and shared parameters.
+
+=== Validation
+
+The graph is validated before export:
+
+- All tensor shapes are consistent across connected edges
+- No cycles exist in the graph
+- All inputs have corresponding sources (function args or constants)
+- All outputs are reachable from the inputs
+
+== Type Mapping: Kotlin to MLIR
+
+The `TypeMapper` converts SKaiNET's Kotlin type system to MLIR types:
+
+[cols="1,1,2"]
+|===
+|Kotlin Type |MLIR Type |Notes
+
+|`Tensor<Float32, Shape4D>`
+|`tensor<BxCxHxWxf32>`
+|4D tensor with f32 elements
+
+|`Tensor<Float16, Shape4D>`
+|`tensor<BxCxHxWxf16>`
+|Promoted to f32 for Coral NPU (no hardware f16)
+
+|`Tensor<Int8, Shape4D>`
+|`tensor<BxCxHxWxi8>`
+|Used for quantized models
+
+|`Shape4D(1, 3, 4, 4)`
+|`1x3x4x4`
+|Dimensions in NCHW order
+
+|`FP32` (DType)
+|`f32`
+|Element type
+
+|`FP16` (DType)
+|`f16`
+|Half-precision
+|===
+
+== StableHLO Conversion
+
+The `StableHloConverter` maps each graph operation to one or more StableHLO operations. This is a direct translation — no optimization happens here.
+
+=== Converter Registry
+
+[cols="1,2,2"]
+|===
+|Converter |Graph Ops |StableHLO Ops
+
+|`MathOperationsConverter`
+|add, subtract, multiply, divide
+|`stablehlo.add`, `stablehlo.subtract`, `stablehlo.multiply`, `stablehlo.divide`
+
+|`LinalgOperationsConverter`
+|matmul, dot, transpose
+|`stablehlo.dot_general`, `stablehlo.transpose`
+
+|`ActivationOperationsConverter`
+|relu, silu, softmax
+|`stablehlo.maximum` (relu), `stablehlo.custom_call` (silu)
+
+|`NeuralNetOperationsConverter`
+|conv2d, batch_norm, pooling
+|`stablehlo.convolution`, custom lowering
+
+|`ConstantOperationsConverter`
+|constant, parameter
+|`stablehlo.constant dense<...>`
+|===
+
+== Optimization Framework
+
+The `StableHloOptimizer` applies passes that transform the MLIR text to reduce operation count, memory traffic, and code size. See xref:explanation:optimization-passes.adoc[] for a detailed breakdown of each pass.
+
+=== Default Pipeline
+
+[mermaid]
+....
+flowchart LR
+    INPUT["Unoptimized<br/>MLIR"] --> CF["Constant<br/>Folding"]
+    CF --> FUSE["Operation<br/>Fusion"]
+    FUSE --> DCE["Dead Code<br/>Elimination"]
+    DCE --> OUTPUT["Optimized<br/>MLIR"]
+
+    style CF fill:#e8f5e9
+    style FUSE fill:#fff3e0
+    style DCE fill:#ffebee
+....
+
+=== Aggressive Pipeline
+
+Runs constant folding twice — once before fusion (to simplify inputs to fuseable patterns) and once after (to fold constants created by fusion):
+
+----
+Constant Folding → Operation Fusion → Dead Code Elimination → Constant Folding
+----
+
+== Dual Output Paths
+
+SKaiNET supports two compilation targets from the same computation graph:
+
+=== Path 1: StableHLO MLIR (for NPU via iree-tools)
+
+[source,bash]
+----
+./gradlew :skainet-compile:skainet-compile-hlo:generateHlo \
+  -Pmodel=rgb2grayscale -Poutput=rgb2grayscale.mlir
+----
+
+Produces standard StableHLO that can be consumed by IREE, the Python transpiler, or any MLIR toolchain.
+
+=== Path 2: C99 Source (for Arduino/embedded)
+
+The `skainet-compile-c` module generates C99 code with Arduino library conventions — header files, `setup()`/`loop()` entry points, and platform-independent math. This path bypasses MLIR entirely and targets microcontrollers that have C compilers but not MLIR toolchains.
+
+== The KSP Code Generation Layer
+
+SKaiNET uses Kotlin Symbol Processing (KSP) to generate boilerplate code at compile time:
+
+- `@GenerateTensorOp` — generates type-safe tensor operation methods
+- `@GenerateNetworkDsl` — generates the `nn { }` DSL builder functions
+- `@GenerateGraphDsl` — generates the `dag { }` DSL builder functions
+
+This means adding a new operation to SKaiNET requires defining it once with annotations, and KSP generates the DSL extensions, tape recording hooks, and type inference code automatically.

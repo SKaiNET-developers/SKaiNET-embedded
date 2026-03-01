@@ -1,0 +1,10 @@
+name: coral-npu-stack
+title: Coral NPU Full Stack
+version: '0.1'
+start_page: ROOT:index.adoc
+nav:
+  - modules/ROOT/nav.adoc
+  - modules/explanation/nav.adoc
+  - modules/tutorials/nav.adoc
+  - modules/howto/nav.adoc
+  - modules/reference/nav.adoc

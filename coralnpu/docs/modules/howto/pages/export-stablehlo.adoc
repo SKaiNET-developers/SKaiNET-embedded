@@ -1,0 +1,138 @@
+= How to Export StableHLO from SKaiNET
+:description: Export a computation graph defined in SKaiNET's Kotlin DSL to a StableHLO MLIR file for consumption by the iree-tools transpiler or IREE compiler.
+
+== Prerequisites
+
+- JDK 21+ installed and configured via `jenv`
+- SKaiNET repository cloned
+
+== Define the Model
+
+Create a model using SKaiNET's tensor DSL. The RGB-to-grayscale model uses a 1×1 convolution:
+
+[source,kotlin]
+----
+// Using the convolution variant (produces smaller MLIR)
+fun Tensor<Float32, Shape4D>.rgb2GrayScale(): Tensor<Float32, Shape4D> {
+    val weights = constant(
+        floatArrayOf(0.299f, 0.587f, 0.114f),
+        Shape4D(1, 3, 1, 1)  // [C_OUT, C_IN, KH, KW]
+    )
+    return this.conv2d(weights, stride = 1 to 1, padding = 0 to 0)
+}
+----
+
+Alternatively, using the graph DSL for more complex models:
+
+[source,kotlin]
+----
+val program = dag {
+    val input = input<FP32>("input", TensorSpec("input", listOf(1, 3, 4, 4), "FP32"))
+    val weights = constant<FP32, Float>("weights") {
+        shape(1, 3, 1, 1) { values(0.299f, 0.587f, 0.114f) }
+    }
+    val gray = conv2d(input, weights, stride = 1 to 1, padding = 0 to 0)
+    output(gray)
+}
+----
+
+== Export to StableHLO
+
+=== Via Gradle Task
+
+[source,bash]
+----
+cd SKaiNET
+
+# Ensure JDK 21 is active
+jenv local 21
+
+# Build the HLO compiler
+./gradlew :skainet-compile:skainet-compile-hlo:build
+
+# Export the grayscale model
+./gradlew :skainet-compile:skainet-compile-hlo:generateHlo \
+  -Pmodel=rgb2grayscale \
+  -Poutput=../iree-tools/rgb2grayscale.mlir
+----
+
+=== Via Kotlin Code
+
+[source,kotlin]
+----
+import sk.ainet.compile.hlo.StableHloConverter
+import sk.ainet.compile.hlo.StableHloOptimizer
+
+// Build computation graph
+val graph = program.toComputeGraph()
+val validation = graph.validate()
+check(validation is ValidationResult.Valid) { "Invalid graph: $validation" }
+
+// Convert to StableHLO
+val converter = StableHloConverter()
+val module = converter.convert(graph)
+
+// Optionally optimize
+val optimizer = StableHloOptimizer.createDefault()
+val optimized = optimizer.optimize(module)
+
+// Write to file
+File("rgb2grayscale.mlir").writeText(optimized.content)
+----
+
+== Verify the Output
+
+The exported `.mlir` file should contain valid StableHLO:
+
+[source,bash]
+----
+cat rgb2grayscale.mlir
+----
+
+Check that it has:
+
+- A `module { }` wrapper
+- A `func.func @name(...)` with typed arguments and return types
+- StableHLO operations (`stablehlo.constant`, `stablehlo.convolution`, etc.)
+- A `return` statement
+
+== Apply Optimizations Before Export
+
+For production use, apply optimization passes before writing the MLIR:
+
+[source,kotlin]
+----
+// Aggressive: constant folding → fusion → DCE → constant folding
+val optimizer = StableHloOptimizer.createAggressive()
+val optimized = optimizer.optimize(module)
+
+// Check what was applied
+val passes = optimized.metadata["optimizations"] as List<String>
+println("Applied: $passes")
+----
+
+See xref:howto:optimize-hlo.adoc[] for details on each optimization pass.
+
+== Using the Grayscale CLI
+
+The `skainet-grayscale-cli` application provides a ready-to-use pipeline:
+
+[source,bash]
+----
+# Process a single image (exports HLO internally)
+./gradlew :skainet-apps:skainet-grayscale-cli:run \
+  --args="--input photo.jpg --model RGB2GRAYSCALE --verbose"
+
+# Use the GPU-optimized matmul variant
+./gradlew :skainet-apps:skainet-grayscale-cli:run \
+  --args="--input photo.jpg --model RGB2GRAYSCALE_MATMUL"
+
+# Batch process a directory
+./gradlew :skainet-apps:skainet-grayscale-cli:run \
+  --args="--input /path/to/images --batch --output /path/to/output"
+----
+
+== Next Steps
+
+- xref:howto:transpile-mlir-to-c.adoc[] — take the exported MLIR and generate C code
+- xref:howto:build-elf-for-npu.adoc[] — build the C code into a bare-metal ELF
