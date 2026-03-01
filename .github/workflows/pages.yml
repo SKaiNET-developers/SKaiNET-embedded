@@ -23,13 +23,13 @@ jobs:
 
       - name: Build Antora site in Docker
         run: |
-          docker build -t antora-docs .
-          docker run --rm -v "${{ github.workspace }}:/docs" antora-docs
+          docker build -t antora-docs ./coralnpu
+          docker run --rm -v "${{ github.workspace }}/coralnpu:/docs" antora-docs
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: build/site
+          path: coralnpu/build/site
 
   deploy:
     needs: build
