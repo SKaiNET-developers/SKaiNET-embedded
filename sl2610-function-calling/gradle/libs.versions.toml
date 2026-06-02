@@ -1,0 +1,27 @@
+[versions]
+kotlin = "2.3.0"
+kotlinxCoroutines = "1.10.2"
+# SKaiNET-transformers BOM (Maven Central) — pins skainet-transformers-* and
+# re-exports sk.ainet:skainet-bom so sk.ainet.core:skainet-* align too.
+skainetTransformers = "0.25.0"
+
+[libraries]
+kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+# SKaiNET-transformers (added in Phase 1)
+skainet-transformers-bom = { module = "sk.ainet.transformers:skainet-transformers-bom", version.ref = "skainetTransformers" }
+skainet-transformers-runtime-kgemma = { module = "sk.ainet.transformers:skainet-transformers-runtime-kgemma" }
+skainet-transformers-agent = { module = "sk.ainet.transformers:skainet-transformers-agent" }
+skainet-transformers-core = { module = "sk.ainet.transformers:skainet-transformers-core" }
+skainet-transformers-runtime-kllama = { module = "sk.ainet.transformers:skainet-transformers-runtime-kllama" }
+skainet-transformers-inference-gemma = { module = "sk.ainet.transformers:skainet-transformers-inference-gemma" }
+skainet-lang-core = { module = "sk.ainet.core:skainet-lang-core" }
+# Host-only model-compiler tooling (DAG -> StableHLO). Not on the native board binary.
+skainet-compile-hlo = { module = "sk.ainet.core:skainet-compile-hlo" }
+skainet-compile-dag = { module = "sk.ainet.core:skainet-compile-dag" }
+skainet-backend-cpu = { module = "sk.ainet.core:skainet-backend-cpu" }
+skainet-backend-native-cpu = { module = "sk.ainet.core:skainet-backend-native-cpu" }
+skainet-io-gguf = { module = "sk.ainet.core:skainet-io-gguf" }
+skainet-io-core = { module = "sk.ainet.core:skainet-io-core" }
+
+[plugins]
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
