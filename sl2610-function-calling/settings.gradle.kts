@@ -15,20 +15,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "sl2610-function-calling"
 
-// The LLM runtime (Gemma decode + IREE vmfb driver + tool-call codec) was
-// extracted into SKaiNET-transformers as :llm-runtime:gemma-iree, consumed here
-// via composite build. The board binary builds against transformers' pinned
-// SKaiNET release as-is; add -PuseLocalSkainet=true only when also building the
-// host gemma-export tooling, which needs StableHLO converters not yet released.
-includeBuild("../../SKaiNET-transformers") {
-    // Map the published coordinate to the local project explicitly — Gradle's
-    // automatic substitution doesn't see vanniktech's lazily-set POM artifactId.
-    dependencySubstitution {
-        substitute(module("sk.ainet.transformers:skainet-transformers-runtime-gemma-iree"))
-            .using(project(":llm-runtime:gemma-iree"))
-    }
-}
+// The LLM runtime (Gemma decode + IREE vmfb driver + tool-call codec) lives in
+// SKaiNET-transformers as :llm-runtime:gemma-iree, consumed here as a published
+// Maven artifact (sk.ainet.transformers:skainet-transformers-runtime-gemma-iree,
+// pinned via the transformers BOM). No composite build needed.
 
 // App-local modules: :asr = Moonshine ASR on the Torq NPU; :vad = Silero speech
-// segmenter. (The former :runtime + :llm now live in gemma-iree, above.)
+// segmenter. (The former :runtime + :llm now live in the published gemma-iree.)
 include(":asr", ":vad")

@@ -35,11 +35,12 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
-        // The board binary wires: the extracted gemma-iree runtime (GemmaDecoder
-        // + IreeRuntime + CompactCodec, from SKaiNET-transformers via composite),
-        // plus the app-local :asr (Moonshine ASR on the NPU) and :vad (Silero).
+        // The board binary wires: the published gemma-iree runtime (GemmaDecoder
+        // + IreeRuntime + CompactCodec, from SKaiNET-transformers), plus the
+        // app-local :asr (Moonshine ASR on the NPU) and :vad (Silero).
         linuxArm64Main.dependencies {
-            implementation("sk.ainet.transformers:skainet-transformers-runtime-gemma-iree:0.25.0")
+            implementation(project.dependencies.platform(libs.skainet.transformers.bom))
+            implementation(libs.skainet.transformers.runtime.gemma.iree)
             implementation(project(":asr"))
             implementation(project(":vad"))
         }
