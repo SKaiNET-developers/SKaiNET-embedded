@@ -1,14 +1,23 @@
 package voicecc.llm
 
-import voicecc.actions.Intent
+/**
+ * A tool call decoded from the model's output: the tool the model chose + the
+ * named args it emitted. This is the LLM module's OWN type — it deliberately
+ * does NOT depend on the app's `actions.Intent`, so `:llm` stays reusable. The
+ * consuming app maps [ToolCall] onto whatever action type it uses.
+ */
+public data class ToolCall(
+    val tool: String,
+    val args: Map<String, String> = emptyMap(),
+)
 
 /**
- * Decodes FunctionGemma's compact tool-call format into [Intent]s — the Kotlin
+ * Decodes FunctionGemma's compact tool-call format into [ToolCall]s — the Kotlin
  * port of vendor/function_calling/compact_codec.py (v10 Octopus-v2 named-arg
  * style, which our fine-tune emits):
- *   <tool_0>(state="on")<end>          -> Intent("set_lights", {state:on})
- *   <tool_4>(metric="all")<end>        -> Intent("get_system_status", {metric:all})
- *   <tool_5>(message="hi")<end>        -> Intent("respond", {message:hi})
+ *   <tool_0>(state="on")<end>          -> ToolCall("set_lights", {state:on})
+ *   <tool_4>(metric="all")<end>        -> ToolCall("get_system_status", {metric:all})
+ *   <tool_5>(message="hi")<end>        -> ToolCall("respond", {message:hi})
  */
 public object CompactCodec {
     private val TOKEN_TO_NAME: Map<String, String?> = mapOf(
@@ -20,11 +29,11 @@ public object CompactCodec {
     private val NAMED_ARG_RE = Regex("""(\w+)\s*=\s*"([^"]*)"""")
 
     /** Parse all tool calls in [raw] (special-token text from the model). */
-    public fun parse(raw: String): List<Intent> =
+    public fun parse(raw: String): List<ToolCall> =
         CALL_RE.findAll(raw).mapNotNull { m ->
             val name = TOKEN_TO_NAME[m.groupValues[1]] ?: return@mapNotNull null
             val args = NAMED_ARG_RE.findAll(m.groupValues[2])
                 .associate { it.groupValues[1] to it.groupValues[2] }
-            Intent(name, args)
+            ToolCall(name, args)
         }.toList()
 }

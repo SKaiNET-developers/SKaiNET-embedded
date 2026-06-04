@@ -27,25 +27,25 @@ kotlin {
     }
 
     sourceSets {
-        commonMain.dependencies {
-            implementation(libs.kotlinx.coroutines)
-            // The gemma3 graph, GGUF loader (incl. Q5_K dequant), KV-cache and
-            // tokenizer are all commonMain (native-capable). We reuse those and
-            // run them eagerly via the pure-Kotlin CPU backend — works on both
-            // jvm (host A/B) and linuxArm64 (the board binary).
-            implementation(project.dependencies.platform(libs.skainet.transformers.bom))
-            implementation(libs.skainet.transformers.inference.gemma)
-            implementation(libs.skainet.lang.core)
-            implementation(libs.skainet.backend.cpu)
-            implementation(libs.skainet.io.core)
-            implementation(libs.skainet.io.gguf)
-        }
+        // commonMain (App + actions) is pure Kotlin — the SKaiNET model deps now
+        // live in :llm (board LLM) and jvmMain (host export tooling), not here.
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
-        // JVM gets the FFM-accelerated backend + the host-only model-compiler
-        // tooling (DAG -> StableHLO). These never ship in the native binary.
+        // The board binary wires the reusable library modules: :llm (FunctionGemma
+        // decode + codec), :asr (Moonshine ASR on the NPU), :vad (Silero segmenter),
+        // and :runtime (the IREE vmfb runner, used by Main's iree-smoke/gemma/gen).
+        linuxArm64Main.dependencies {
+            implementation(project(":runtime"))
+            implementation(project(":llm"))
+            implementation(project(":asr"))
+            implementation(project(":vad"))
+        }
+        // JVM-only host model-compiler tooling (export/: DAG -> StableHLO trace).
+        // The FFM-accelerated backend runs the trace; never ships in the native binary.
         jvmMain.dependencies {
+            implementation(project.dependencies.platform(libs.skainet.transformers.bom))
+            implementation(libs.skainet.lang.core)
             implementation(libs.skainet.backend.native.cpu)
             implementation(libs.skainet.compile.hlo)
             implementation(libs.skainet.compile.dag)

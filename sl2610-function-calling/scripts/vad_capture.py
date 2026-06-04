@@ -17,11 +17,14 @@ from utils.speech import SileroSpeechSegmenter, SAMPLING_RATE, CHUNK_SIZE  # noq
 
 src = "mic"
 device = None
+once = False  # exit after the first detected utterance (frees the ~250MB Silero
+              # VAD + the mic so the LLM gen subprocess gets the full 1.9GB board)
 args = sys.argv[1:]
 i = 0
 while i < len(args):
     if args[i] == "--source": src = args[i + 1]; i += 2
     elif args[i] == "--device": device = args[i + 1]; i += 2
+    elif args[i] == "--once": once = True; i += 1
     else: i += 1
 
 OUT = "/tmp"
@@ -39,18 +42,35 @@ def emit(segment):
     print(f"SEGMENT\t{path}", flush=True)
 
 if src == "mic":
+    import sounddevice as sd
     from utils.speech import SoundDeviceAudioSource
     dev = device
     if dev is not None and dev.lstrip("-").isdigit(): dev = int(dev)
+    if dev is None:
+        # No --device given: auto-pick a real capture device. The board's ALSA
+        # "default" routes to the klamath i2s card (no mic attached -> silence),
+        # so prefer a USB-audio input (e.g. the C920 webcam mic) when present.
+        devs = sd.query_devices()
+        cap = [i for i, d in enumerate(devs) if d["max_input_channels"] > 0]
+        usb = [i for i in cap if any(k in devs[i]["name"].lower()
+                                     for k in ("usb", "webcam", "c920"))]
+        if usb or cap:
+            dev = (usb or cap)[0]
+            print(f"auto-selected input device {dev}: {devs[dev]['name']}", flush=True)
     print("LISTENING (mic). Speak a command...", flush=True)
     sa = SoundDeviceAudioSource(device=dev, sample_rate=SAMPLING_RATE, chunk_size=CHUNK_SIZE)
     sa.start()
     try:
         while True:
+            # Don't leak: if the Kotlin parent died (reparented to init), exit so
+            # an orphaned capture can't keep holding the mic + RAM.
+            if os.getppid() == 1: break
             c = sa.read_chunk(timeout_s=0.2)
             if c is None: continue
             s = seg.feed(c[0])
-            if s is not None: emit(s)
+            if s is not None:
+                emit(s)
+                if once: break  # release mic + VAD RAM; caller runs the pipeline then re-listens
     finally:
         sa.stop()
 else:  # wav replay

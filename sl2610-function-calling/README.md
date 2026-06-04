@@ -35,8 +35,11 @@ handlers are log-only (no Coral HAT assumed); register your own to drive real ha
 ## Status
 - **Phase 0 ✅** — KMP scaffold (`jvm` + `linuxArm64`), ActionRouter ported, dev loop proven:
   host `jvmRun` and a cross-compiled aarch64 binary that **deploys + runs on the board**.
-- Phase 1 (next) — LLM swap: FunctionGemma → SKaiNET-transformers Kotlin Gemma.
-- Phases 2–4 — StableHLO→IREE bridge, Moonshine-on-NPU from Kotlin, full pipeline + parity/latency gate.
+- **Phase 1 ✅** — FunctionGemma-270M reimplemented via SKaiNET-transformers (gemma3 DSL →
+  StableHLO → IREE f16 vmfb); numerically matches llama.cpp and runs on the board.
+- **Phases 2–4** — Moonshine-on-NPU from Kotlin, full live-mic pipeline, parity/latency gate.
+
+See `docs/STATUS.md` for the detailed, up-to-date status, know-how, and handoff notes.
 
 ## Targets
 - `jvm()` — fast host dev + A/B reference harness.
@@ -65,8 +68,16 @@ surfaces `jvmRun` and `link…LinuxArm64`. Run configs live in `.run/`.
 ```
 src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + llm/ (CompactCodec) + App.kt
 src/jvmMain/              host main + readSystemStatus actual + export/ (DAG→StableHLO bridge)
-src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action) + runtime/ (IREE)
+src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action)
+
+Reusable KMP library modules (drop into any KMP app):
+  :runtime   generic IREE vmfb runner
+  :llm       FunctionGemma decode (GemmaDecoder) + compact tool-call codec
+  :asr       Moonshine ASR on the Torq NPU
+  :vad       Silero speech segmenter
+
 scripts/deploy.sh         host→board deploy (+ libcrypt compat)
+docs/STATUS.md            detailed status / know-how / handoff
 ```
 
 ## License
