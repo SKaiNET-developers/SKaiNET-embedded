@@ -46,6 +46,14 @@ See `docs/STATUS.md` for the detailed, up-to-date status, know-how, and handoff 
 - `linuxArm64()` — the shipped board binary (cross-compiled from an **x64** host; Kotlin/Native
   cannot cross-compile from ARM).
 
+## Models
+The FunctionGemma-270M GGUF (~248 MB) is **not committed** (gitignored). Fetch it once
+from Hugging Face ([`BrinqAI/functiongemma-270m-physical-ai`](https://huggingface.co/BrinqAI/functiongemma-270m-physical-ai))
+into `models/`:
+```bash
+./gradlew downloadModel        # set HF_TOKEN=… only if the repo becomes gated
+```
+
 ## Dev loop
 ```bash
 ./gradlew :jvmRun                          # run on host

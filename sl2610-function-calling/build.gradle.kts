@@ -1,4 +1,7 @@
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -76,6 +79,64 @@ tasks.register<JavaExec>("hloExport") {
     val out = layout.buildDirectory.dir("mlir").get().asFile
     doFirst { out.mkdirs() }
     args(out.resolve("addrelu.mlir").path)
+}
+
+// Fetch the FunctionGemma-270M GGUF (~248 MB) from Hugging Face into models/.
+// The gguf is gitignored (not committed) — run this once before the board pipeline.
+//   ./gradlew downloadModel            (set HF_TOKEN=… if the repo ever becomes gated)
+val functionGemmaRepo = "BrinqAI/functiongemma-270m-physical-ai"
+val functionGemmaFile = "functiongemma-physical-ai-v10-Q5_K_M.gguf"
+
+tasks.register("downloadModel") {
+    group = "setup"
+    description = "Download the FunctionGemma-270M GGUF (~248 MB) from Hugging Face into models/."
+    val dest = layout.projectDirectory.dir("models").file(functionGemmaFile).asFile
+    outputs.file(dest)
+    doLast {
+        if (dest.exists() && dest.length() > 0) {
+            logger.lifecycle("FunctionGemma already present: ${dest.path} (${dest.length() / 1_000_000} MB)")
+            return@doLast
+        }
+        dest.parentFile.mkdirs()
+        val token = System.getenv("HF_TOKEN")
+        var url = URI("https://huggingface.co/$functionGemmaRepo/resolve/main/$functionGemmaFile?download=true").toURL()
+        val tmp = File(dest.path + ".part")
+        // Follow HF's 302 to the LFS CDN by hand (it's a cross-host redirect, and the
+        // auth header must NOT be forwarded to the presigned CDN URL or it 400s).
+        var redirects = 0
+        while (true) {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = false
+                connectTimeout = 30_000
+                readTimeout = 60_000
+                setRequestProperty("User-Agent", "sl2610-function-calling-gradle")
+                if (token != null && url.host.endsWith("huggingface.co")) {
+                    setRequestProperty("Authorization", "Bearer $token")
+                }
+            }
+            when (val code = conn.responseCode) {
+                in 300..399 -> {
+                    val loc = conn.getHeaderField("Location") ?: error("redirect ($code) without Location")
+                    conn.disconnect()
+                    if (++redirects > 8) error("too many redirects fetching $functionGemmaFile")
+                    url = URI(loc).toURL()
+                }
+                200 -> {
+                    val total = conn.contentLengthLong
+                    logger.lifecycle(
+                        "downloading $functionGemmaFile " +
+                            "(${if (total > 0) "${total / 1_000_000} MB" else "unknown size"}) -> ${dest.path}",
+                    )
+                    conn.inputStream.use { input -> tmp.outputStream().use { out -> input.copyTo(out, 1 shl 20) } }
+                    conn.disconnect()
+                    if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
+                    logger.lifecycle("done: ${dest.path} (${dest.length() / 1_000_000} MB)")
+                    return@doLast
+                }
+                else -> { conn.disconnect(); error("HTTP $code fetching $url") }
+            }
+        }
+    }
 }
 
 // "Trace SDPA first": record a 1-block gemma3 forward and report the op node
