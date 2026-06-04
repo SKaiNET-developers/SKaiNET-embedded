@@ -3,16 +3,16 @@ package voicecc
 import voicecc.actions.Intent
 import voicecc.actions.defaultRouter
 import voicecc.asr.MoonshineRunner
-import voicecc.llm.GemmaDecoder
+import sk.ainet.transformers.gemma.iree.GemmaDecoder
 import voicecc.vad.VadSegmenter
 
 /**
  * End-to-end on the board: wav -> Moonshine ASR (Torq NPU, prebuilt vmfb via
  * matched torq.runtime) -> FunctionGemma greedy decode (OUR DSL->StableHLO->IREE
  * f16 vmfb, CPU) -> <tool_N>(args) -> ActionRouter. The heavy lifting lives in
- * the reusable :llm ([GemmaDecoder] + codec) and :runtime ([IreeRuntime])
- * modules; this just wires ASR -> LLM -> actions and maps [voicecc.llm.ToolCall]
- * onto the app's [Intent].
+ * the extracted gemma-iree runtime ([GemmaDecoder] + codec + IreeRuntime) from
+ * SKaiNET-transformers; this just wires ASR -> LLM -> actions and maps the
+ * runtime's ToolCall onto the app's [Intent].
  */
 public fun runPipeline(
     wav: String,

@@ -35,12 +35,11 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
-        // The board binary wires the reusable library modules: :llm (FunctionGemma
-        // decode + codec), :asr (Moonshine ASR on the NPU), :vad (Silero segmenter),
-        // and :runtime (the IREE vmfb runner, used by Main's iree-smoke/gemma/gen).
+        // The board binary wires: the extracted gemma-iree runtime (GemmaDecoder
+        // + IreeRuntime + CompactCodec, from SKaiNET-transformers via composite),
+        // plus the app-local :asr (Moonshine ASR on the NPU) and :vad (Silero).
         linuxArm64Main.dependencies {
-            implementation(project(":runtime"))
-            implementation(project(":llm"))
+            implementation("sk.ainet.transformers:skainet-transformers-runtime-gemma-iree:0.25.0")
             implementation(project(":asr"))
             implementation(project(":vad"))
         }

@@ -74,15 +74,18 @@ surfaces `jvmRun` and `link…LinuxArm64`. Run configs live in `.run/`.
 
 ## Layout
 ```
-src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + llm/ (CompactCodec) + App.kt
+src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + App.kt
 src/jvmMain/              host main + readSystemStatus actual + export/ (DAG→StableHLO bridge)
 src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action)
 
-Reusable KMP library modules (drop into any KMP app):
-  :runtime   generic IREE vmfb runner
-  :llm       FunctionGemma decode (GemmaDecoder) + compact tool-call codec
+App-local KMP modules:
   :asr       Moonshine ASR on the Torq NPU
   :vad       Silero speech segmenter
+
+The Gemma LLM runtime was extracted into SKaiNET-transformers and is consumed
+via composite build (see settings.gradle.kts):
+  sk.ainet.transformers:skainet-transformers-runtime-gemma-iree
+    GemmaDecoder (decode loop) + IreeRuntime (vmfb driver) + CompactCodec/ToolCall
 
 scripts/deploy.sh         host→board deploy (+ libcrypt compat)
 docs/STATUS.md            detailed status / know-how / handoff
