@@ -6,6 +6,8 @@ plugins {
 group = "sk.ainet.embedded"
 version = "0.1.0"
 
+val skainetVersion = providers.gradleProperty("skainetVersion").getOrElse("0.29.0")
+
 repositories {
     mavenCentral()
     google()
@@ -16,9 +18,9 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            implementation("sk.ainet:skainet-lang-core:0.13.0")
-            implementation("sk.ainet:skainet-compile-dag:0.13.0")
-            implementation("sk.ainet:skainet-compile-opt:0.13.0")
+            implementation("sk.ainet.core:skainet-lang-core:$skainetVersion")
+            implementation("sk.ainet.core:skainet-compile-dag:$skainetVersion")
+            implementation("sk.ainet.core:skainet-compile-opt:$skainetVersion")
         }
 
         commonTest.dependencies {
