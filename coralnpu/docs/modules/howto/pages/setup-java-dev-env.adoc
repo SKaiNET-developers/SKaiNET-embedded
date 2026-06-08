@@ -181,9 +181,9 @@ To use SKaiNET in an Android project, add the Maven dependency after publishing 
 ----
 // build.gradle.kts (Android module)
 dependencies {
-    implementation("sk.ainet:skainet-lang-core:0.1.0")
-    implementation("sk.ainet:skainet-compile-hlo:0.1.0")
-    implementation("sk.ainet:skainet-io-image:0.1.0")
+    implementation("sk.ainet.core:skainet-lang-core:0.29.0")
+    implementation("sk.ainet.core:skainet-compile-hlo:0.29.0")
+    implementation("sk.ainet.core:skainet-io-image:0.29.0")
 }
 ----
 
