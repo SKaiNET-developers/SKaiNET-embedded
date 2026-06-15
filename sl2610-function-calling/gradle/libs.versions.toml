@@ -3,7 +3,7 @@ kotlin = "2.3.0"
 kotlinxCoroutines = "1.10.2"
 # SKaiNET-transformers BOM (Maven Central) — pins skainet-transformers-* and
 # re-exports sk.ainet:skainet-bom so sk.ainet.core:skainet-* align too.
-skainetTransformers = "0.29.1"
+skainetTransformers = "0.30.0"
 
 [libraries]
 kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
