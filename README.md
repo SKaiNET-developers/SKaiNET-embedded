@@ -31,8 +31,18 @@ SKaiNET-embedded/
 │       ├── bazel_builder.py   # Bazel integration for cross-compilation
 │       ├── simulator.py       # MPACT simulator driver
 │       └── rgb2grayscale.mlir # Example model
+├── sl2610-function-calling/   # Sample: Kotlin/Native FunctionGemma voice function-calling demo
 └── LICENSE
 ```
+
+## Samples
+
+- **[sl2610-function-calling/](sl2610-function-calling/)** — Kotlin Multiplatform re-implementation
+  of the Synaptics [FunctionGemma function-calling demo](https://github.com/synaptics-astra-demos/sl2610-examples/tree/main/Function_calling).
+  An on-device voice/text → tool-call pipeline (mic → VAD → Moonshine ASR on the Torq NPU →
+  FunctionGemma LLM on CPU → action) running as a single cross-compiled aarch64 binary on the
+  Astra Machina SL2610, built on SKaiNET with the DSL → StableHLO → IREE path. See its
+  [README](sl2610-function-calling/README.md).
 
 ## Quick Start
 

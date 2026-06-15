@@ -1,0 +1,11 @@
+.gradle/
+build/
+.kotlin/
+*.kexe
+# Models (fetched at setup, not committed)
+/models/
+*.gguf
+*.vmfb
+# Local
+*.log
+.DS_Store

@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="1100" viewBox="0 0 1160 1100" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect width="1160" height="1100" fill="#f1f5f9"/>
+
+  <!-- header -->
+  <text x="80" y="58" font-size="30" font-weight="700" fill="#0f172a">On-Device Voice → Tool-Call Pipeline</text>
+  <text x="80" y="87" font-size="15" fill="#475569">Synaptics Astra Machina SL2610 &#183; mic &#8594; VAD &#8594; ASR (NPU) &#8594; LLM (CPU) &#8594; action</text>
+
+  <!-- hardware pills -->
+  <rect x="80" y="108" width="316" height="32" rx="16" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="98" y="129" font-size="13.5" font-weight="600" fill="#1e3a8a">CPU &#183; Arm Cortex-A55 &#215;1&#8211;2 (ARMv8.2)</text>
+  <rect x="408" y="108" width="372" height="32" rx="16" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="426" y="129" font-size="13.5" font-weight="600" fill="#9a3412">NPU &#183; Synaptics Torq T1 &#183; 1 TOPS &#183; bf16 / int8</text>
+  <rect x="940" y="108" width="140" height="32" rx="16" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="1010" y="129" font-size="13" font-weight="700" fill="#065f46" text-anchor="middle">ON-DEVICE</text>
+
+  <!-- audio in -->
+  <rect x="486" y="158" width="188" height="28" rx="14" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="580" y="177" font-size="13" font-weight="600" fill="#334155" text-anchor="middle">&#127908; mic &#183; 16 kHz PCM</text>
+  <line x1="580" y1="186" x2="580" y2="196" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ===== STAGE 1: Silero VAD (CPU) ===== -->
+  <rect x="120" y="196" width="8" height="96" rx="4" fill="#2563eb"/>
+  <rect x="128" y="196" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="244" r="23" fill="#2563eb"/>
+  <text x="178" y="251" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="222" y="238" font-size="18" font-weight="700" fill="#0f172a">Silero VAD</text>
+  <text x="222" y="262" font-size="13" fill="#64748b">Voice-activity detection &#8594; one WAV per utterance</text>
+  <rect x="684" y="230" width="58" height="28" rx="14" fill="#2563eb"/>
+  <text x="713" y="249" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">CPU</text>
+  <rect x="752" y="230" width="104" height="28" rx="14" fill="#f1f5f9"/>
+  <text x="804" y="249" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">&lt;2M params</text>
+  <rect x="866" y="230" width="150" height="28" rx="14" fill="#eff6ff"/>
+  <text x="941" y="249" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">fp32 &#183; ONNX</text>
+
+  <line x1="580" y1="292" x2="580" y2="336" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="596" y="318" font-size="12" fill="#64748b">utterance audio</text>
+
+  <!-- ===== STAGE 2: Moonshine preprocessor (CPU) ===== -->
+  <rect x="120" y="336" width="8" height="96" rx="4" fill="#2563eb"/>
+  <rect x="128" y="336" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="384" r="23" fill="#2563eb"/>
+  <text x="178" y="391" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="222" y="378" font-size="18" font-weight="700" fill="#0f172a">Moonshine preprocessor</text>
+  <text x="222" y="402" font-size="13" fill="#64748b">Conv audio front-end &#8594; bf16 features [1,288,frames]</text>
+  <rect x="684" y="370" width="58" height="28" rx="14" fill="#2563eb"/>
+  <text x="713" y="389" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">CPU</text>
+  <rect x="752" y="370" width="104" height="28" rx="14" fill="#f1f5f9"/>
+  <text x="804" y="389" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">~1.7M</text>
+  <rect x="866" y="370" width="150" height="28" rx="14" fill="#eff6ff"/>
+  <text x="941" y="389" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">fp32 &#8594; bf16</text>
+
+  <line x1="580" y1="432" x2="580" y2="476" stroke="#ea580c" stroke-width="2.5" marker-end="url(#arr)"/>
+  <rect x="596" y="442" width="120" height="24" rx="12" fill="#fff7ed" stroke="#ea580c"/>
+  <text x="656" y="459" font-size="11.5" font-weight="700" fill="#9a3412" text-anchor="middle">CPU &#8594; NPU</text>
+
+  <!-- ===== STAGE 3: Moonshine encoder (NPU) ===== -->
+  <rect x="120" y="476" width="8" height="96" rx="4" fill="#ea580c"/>
+  <rect x="128" y="476" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="524" r="23" fill="#ea580c"/>
+  <text x="178" y="531" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="222" y="518" font-size="18" font-weight="700" fill="#0f172a">Moonshine encoder &#9889;</text>
+  <text x="222" y="542" font-size="13" fill="#64748b">Transformer encoder (static-shape bf16 conv + matmul)</text>
+  <rect x="684" y="510" width="58" height="28" rx="14" fill="#ea580c"/>
+  <text x="713" y="529" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">NPU</text>
+  <rect x="752" y="510" width="104" height="28" rx="14" fill="#f1f5f9"/>
+  <text x="804" y="529" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">~6M</text>
+  <rect x="866" y="510" width="150" height="28" rx="14" fill="#fff7ed"/>
+  <text x="941" y="529" font-size="12.5" font-weight="600" fill="#9a3412" text-anchor="middle">bf16 &#183; vmfb</text>
+
+  <line x1="580" y1="572" x2="580" y2="616" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="596" y="598" font-size="12" fill="#64748b">encoded states</text>
+
+  <!-- ===== STAGE 4: Moonshine decoder (NPU) ===== -->
+  <rect x="120" y="616" width="8" height="96" rx="4" fill="#ea580c"/>
+  <rect x="128" y="616" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="664" r="23" fill="#ea580c"/>
+  <text x="178" y="671" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="222" y="658" font-size="18" font-weight="700" fill="#0f172a">Moonshine decoder + KV &#9889;</text>
+  <text x="222" y="682" font-size="13" fill="#64748b">Autoregressive ASR decode (decoder + decoder_with_past)</text>
+  <rect x="684" y="650" width="58" height="28" rx="14" fill="#ea580c"/>
+  <text x="713" y="669" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">NPU</text>
+  <rect x="752" y="650" width="104" height="28" rx="14" fill="#f1f5f9"/>
+  <text x="804" y="669" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">~19M</text>
+  <rect x="866" y="650" width="150" height="28" rx="14" fill="#fff7ed"/>
+  <text x="941" y="669" font-size="12.5" font-weight="600" fill="#9a3412" text-anchor="middle">bf16 &#183; vmfb</text>
+
+  <line x1="580" y1="712" x2="580" y2="756" stroke="#2563eb" stroke-width="2.5" marker-end="url(#arr)"/>
+  <rect x="596" y="722" width="180" height="24" rx="12" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="686" y="739" font-size="11.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">NPU &#8594; CPU &#183; transcript</text>
+
+  <!-- ===== STAGE 5: FunctionGemma (CPU) ===== -->
+  <rect x="120" y="756" width="8" height="96" rx="4" fill="#2563eb"/>
+  <rect x="128" y="756" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="804" r="23" fill="#2563eb"/>
+  <text x="178" y="811" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+  <text x="222" y="798" font-size="18" font-weight="700" fill="#0f172a">FunctionGemma-270M &#129504;</text>
+  <text x="222" y="822" font-size="13" fill="#64748b">LLM tool-router &#183; functional tokens &#8594; &lt;tool_N&gt;(args)</text>
+  <rect x="684" y="790" width="58" height="28" rx="14" fill="#2563eb"/>
+  <text x="713" y="809" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">CPU</text>
+  <rect x="752" y="790" width="104" height="28" rx="14" fill="#dbeafe"/>
+  <text x="804" y="809" font-size="13" font-weight="800" fill="#1e3a8a" text-anchor="middle">270M</text>
+  <rect x="866" y="790" width="150" height="28" rx="14" fill="#eff6ff"/>
+  <text x="941" y="809" font-size="12" font-weight="600" fill="#1e3a8a" text-anchor="middle">Q5_K_M / f16</text>
+
+  <line x1="580" y1="852" x2="580" y2="896" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="596" y="878" font-size="12" fill="#64748b">&lt;tool_0&gt;(state="on")</text>
+
+  <!-- ===== STAGE 6: ActionRouter (CPU) ===== -->
+  <rect x="120" y="896" width="8" height="96" rx="4" fill="#2563eb"/>
+  <rect x="128" y="896" width="912" height="96" rx="16" fill="#ffffff" stroke="#e6eaf0" filter="url(#shadow)"/>
+  <circle cx="178" cy="944" r="23" fill="#2563eb"/>
+  <text x="178" y="951" font-size="19" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+  <text x="222" y="938" font-size="18" font-weight="700" fill="#0f172a">CompactCodec &#8594; ActionRouter</text>
+  <text x="222" y="962" font-size="13" fill="#64748b">tool call &#8594; hardware (set_lights, buzzer, alarm &#8230;)</text>
+  <rect x="684" y="930" width="58" height="28" rx="14" fill="#2563eb"/>
+  <text x="713" y="949" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">CPU</text>
+  <rect x="752" y="930" width="104" height="28" rx="14" fill="#f1f5f9"/>
+  <text x="804" y="949" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">&#8212;</text>
+  <rect x="866" y="930" width="150" height="28" rx="14" fill="#eff6ff"/>
+  <text x="941" y="949" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Kotlin/Native</text>
+
+  <!-- ===== footer summary ===== -->
+  <rect x="128" y="1016" width="912" height="64" rx="16" fill="#0f172a"/>
+  <text x="152" y="1044" font-size="14.5" font-weight="700" fill="#ffffff">Fully on-device &#183; no cloud</text>
+  <circle cx="158" cy="1066" r="6" fill="#3b82f6"/>
+  <text x="170" y="1071" font-size="12.5" fill="#cbd5e1">CPU &#183; A55</text>
+  <circle cx="262" cy="1066" r="6" fill="#fb923c"/>
+  <text x="274" y="1071" font-size="12.5" fill="#cbd5e1">NPU &#183; Torq T1</text>
+  <text x="1016" y="1044" font-size="13.5" font-weight="700" fill="#e2e8f0" text-anchor="end">ASR 27M &#8594; NPU &#160;&#183;&#160; LLM 270M &#8594; CPU</text>
+  <text x="1016" y="1071" font-size="12" fill="#94a3b8" text-anchor="end">6 tools &#183; set_lights / play_buzzer / set_alarm / cancel_alarm / get_system_status / respond</text>
+</svg>
