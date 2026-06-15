@@ -10,8 +10,8 @@ DEST=${DEST:-/home/root/voicecc-kt}
 SSH_OPTS=${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10}
 
 # Prefer the release binary; fall back to debug.
-BIN=${BIN:-$ROOT/build/bin/linuxArm64/releaseExecutable/sl2610-voice-cc-kt.kexe}
-[ -f "$BIN" ] || BIN=$ROOT/build/bin/linuxArm64/debugExecutable/sl2610-voice-cc-kt.kexe
+BIN=${BIN:-$ROOT/build/bin/linuxArm64/releaseExecutable/sl2610-function-calling.kexe}
+[ -f "$BIN" ] || BIN=$ROOT/build/bin/linuxArm64/debugExecutable/sl2610-function-calling.kexe
 [ -f "$BIN" ] || { echo "no linuxArm64 binary; run ./gradlew linkReleaseExecutableLinuxArm64" >&2; exit 1; }
 
 echo "[deploy] $BIN -> $BOARD:$DEST/voicecc"

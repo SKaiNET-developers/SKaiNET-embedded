@@ -17,7 +17,7 @@ Hardware mapping (matches the sample): **Moonshine ASR → Torq NPU**;
 ## Workspace (multi‑repo, no top‑level git)
 - `sl2610-voice-cc-kt/` — THIS app (KMP: `jvm` host + `linuxArm64` board).
 - `SKaiNET/` (branch `feature/397-coral-npu-docs`) — NN DSL → StableHLO (`skainet-compile-hlo`), CPU backend, `.irpa` writer (`skainet-io-iree-params`).
-- `SKaiNET-transformers/` (branch `develop`) — Gemma/Llama runtimes, GGUF loader, `GGUFTokenizer`. Built via composite `-PuseLocalSkainet=true`.
+- `SKaiNET-transformers/` — Gemma/Llama runtimes, GGUF loader, `GGUFTokenizer`. **Consumed as the released `0.30.0` from Maven Central** (`sk.ainet.transformers:skainet-transformers-bom`); the board LLM comes in via the published `skainet-transformers-runtime-gemma-iree`. (The `-PuseLocalSkainet=true` composite build remains available in `SKaiNET-transformers` for local engine work, but this app no longer needs it.)
 - `sl2610-voice-cc/` — the Python reference app (Octopus‑v2 prompt, compact codec, Moonshine runner).
 - `skainet-whisper/` — UNRELATED sibling (a Whisper STT app for an Amlogic box). Not a dependency. See its `moonshine.md`.
 - `build-mlir/` — scratch: vmfbs, .irpa, mlir, the `torqpkg`/`abenv`/`piperpkg` venvs.
@@ -59,6 +59,16 @@ Split so the LLM is reusable in other KMP apps (not welded to this app's wiring)
 - Our artifacts pushed to `/home/root/ireetest/` (vmfbs+irpa) and `/home/root/voicecc-kt/` (binary, scripts, test wavs).
 
 ## STATUS — what works ✅
+- **Released-versions e2e re-verified on the board (2026‑06‑15).** Rebuilt the
+  `linuxArm64` binary against the **published SKaiNET‑transformers 0.30.0**
+  (Maven Central; no composite, no local publish) and ran the full pipeline on
+  the SL2610: `pipeline cmd.wav` →
+  `[1/4 asr] "Turn the light on"` (Moonshine, Torq NPU) →
+  `[2/4 llm] <tool_0>(state="on")<end>` (FunctionGemma, CPU) →
+  `[3/4 codec] Intent(set_lights, {state=on})` →
+  `[4/4 act] [ok] set_lights: state=on`, EXIT 0. Board reachable via adb/ssh at
+  192.168.3.26 (per‑boot DHCP); ~1.5 GB free at run time. 0.30.0 is version-
+  aligned with SKaiNET 0.30.0 (Q5_K packed matmul, NEON, Kotlin/Native cinterop).
 - **Phase 1 (LLM swap) DONE.** FunctionGemma‑270M via SKaiNET DSL→StableHLO→IREE:
   - **Numeric parity** vs llama.cpp: vmfb == llama 4/4 argmax, cos 0.999; eager==vmfb bit‑exact (the IREE lowering is exact).
   - **Behavioral parity**: byte‑identical `<tool_N>(args)` tool calls on the demo prompts (host A/B).
