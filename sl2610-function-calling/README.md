@@ -70,4 +70,6 @@ scripts/deploy.sh         host→board deploy (+ libcrypt compat)
 ```
 
 ## License
-Apache-2.0 (consistent with SKaiNET).
+MIT — see [LICENSE](LICENSE) (consistent with SKaiNET). This demo is a complete
+clean-room rewrite of Google's function-calling sample; no Apache-2.0-licensed
+code is retained.
