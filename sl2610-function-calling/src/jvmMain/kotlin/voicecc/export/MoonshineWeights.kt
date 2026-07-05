@@ -15,20 +15,17 @@ import kotlin.reflect.KClass
  * emits weight CONSTANTS (a runnable vmfb) instead of weight arguments.
  *
  * Mechanism: [ModuleParameter.value] is mutable, so we walk the module tree, map each DSL
- * parameter to its checkpoint tensor, apply the layout convention, and overwrite the value
- * before tracing.
+ * parameter to its checkpoint tensor by NAME, apply the layout convention, and overwrite the
+ * value before tracing.
  *
- * NAME-COLLISION NOTE: the published `moonshineEncoder()` leaves the attention / LayerNorm
- * parameters *un-layer-qualified* (`attn.q_proj.weight`, `attn_norm.weight` repeat every
- * layer), while the FFN ones are qualified (`enc.0.ffn_up.weight`). So we can't map those by
- * name alone — we track the layer index positionally during the walk (each layer block starts
- * at `attn_norm.weight`). The clean fix is to layer-qualify those names in the DSL; see the
- * demo notes. Until then this positional mapping is the workaround.
+ * Requires transformers **0.34.1+**, where every encoder parameter is uniquely layer-qualified
+ * (`enc.$layer.attn.q_proj.weight`, `enc.$layer.attn_norm.weight`, …). (0.34.0 left the attn/norm
+ * names un-qualified and needed a positional workaround; that's gone.)
  *
  * CHECKPOINT: supply a directory of per-tensor little-endian f32 `.bin` files named by the HF
- * tensor name (e.g. `encoder.layers.0.self_attn.q_proj.weight.bin`). The HF names + the
- * transpose conventions below are the validated moonshine-tiny mapping; verify against your
- * checkpoint (the values are untestable without it).
+ * tensor name (e.g. `encoder.layers.0.self_attn.q_proj.weight.bin`). The HF names + the transpose
+ * conventions in [hfNameFor] are the validated moonshine-tiny mapping; verify against your
+ * checkpoint (the values are untestable without it). Missing tensors fail fast.
  */
 internal interface WeightSource {
     /** Flat row-major f32 values for [hfName], or null if absent. */
@@ -51,29 +48,37 @@ internal class DirBinWeightSource(private val dir: String) : WeightSource {
     }
 }
 
+private val ENC_LAYER = Regex("""^enc\.(\d+)\.(.+)$""")
+
 /**
- * Map a DSL parameter (its local [name] and resolved [layer]; layer < 0 = the final norm) to
- * the moonshine-tiny HF tensor name, plus whether the 2-D weight must be transposed to match
- * the DSL's `[out, in]` (linear) / `input @ weightᵀ` convention.
+ * Map a DSL parameter name to its moonshine-tiny HF tensor name, plus whether the 2-D weight
+ * must be transposed to match the DSL's `[out, in]` (linear) / `input @ weightᵀ` convention.
+ * Relies on the 0.34.1 layer-qualified names (`enc.$layer.*`).
  *
  * VERIFY these HF names against your checkpoint before trusting the output.
  */
-private fun hfNameFor(name: String, layer: Int): Pair<String, Boolean>? = when {
-    layer < 0 && name == "enc_out_norm.weight" -> "encoder.layer_norm.weight" to false
-    layer < 0 && name == "enc_out_norm.bias" -> "encoder.layer_norm.bias" to false
-    name == "attn_norm.weight" -> "encoder.layers.$layer.self_attn_layer_norm.weight" to false
-    name == "attn_norm.bias" -> "encoder.layers.$layer.self_attn_layer_norm.bias" to false
-    name == "attn.q_proj.weight" -> "encoder.layers.$layer.self_attn.q_proj.weight" to true
-    name == "attn.k_proj.weight" -> "encoder.layers.$layer.self_attn.k_proj.weight" to true
-    name == "attn.v_proj.weight" -> "encoder.layers.$layer.self_attn.v_proj.weight" to true
-    name == "attn.o_proj.weight" -> "encoder.layers.$layer.self_attn.o_proj.weight" to true
-    name == "ffn_norm.weight" -> "encoder.layers.$layer.final_layer_norm.weight" to false
-    name == "ffn_norm.bias" -> "encoder.layers.$layer.final_layer_norm.bias" to false
-    name.endsWith("ffn_up.weight") -> "encoder.layers.$layer.fc1.weight" to true
-    name.endsWith("ffn_up.bias") -> "encoder.layers.$layer.fc1.bias" to false
-    name.endsWith("ffn_down.weight") -> "encoder.layers.$layer.fc2.weight" to true
-    name.endsWith("ffn_down.bias") -> "encoder.layers.$layer.fc2.bias" to false
-    else -> null
+private fun hfNameFor(dslName: String): Pair<String, Boolean>? {
+    when (dslName) {
+        "enc_out_norm.weight" -> return "encoder.layer_norm.weight" to false
+        "enc_out_norm.bias" -> return "encoder.layer_norm.bias" to false
+    }
+    val m = ENC_LAYER.matchEntire(dslName) ?: return null
+    val layer = m.groupValues[1]
+    return when (m.groupValues[2]) {
+        "attn_norm.weight" -> "encoder.layers.$layer.self_attn_layer_norm.weight" to false
+        "attn_norm.bias" -> "encoder.layers.$layer.self_attn_layer_norm.bias" to false
+        "attn.q_proj.weight" -> "encoder.layers.$layer.self_attn.q_proj.weight" to true
+        "attn.k_proj.weight" -> "encoder.layers.$layer.self_attn.k_proj.weight" to true
+        "attn.v_proj.weight" -> "encoder.layers.$layer.self_attn.v_proj.weight" to true
+        "attn.o_proj.weight" -> "encoder.layers.$layer.self_attn.o_proj.weight" to true
+        "ffn_norm.weight" -> "encoder.layers.$layer.final_layer_norm.weight" to false
+        "ffn_norm.bias" -> "encoder.layers.$layer.final_layer_norm.bias" to false
+        "ffn_up.weight" -> "encoder.layers.$layer.fc1.weight" to true
+        "ffn_up.bias" -> "encoder.layers.$layer.fc1.bias" to false
+        "ffn_down.weight" -> "encoder.layers.$layer.fc2.weight" to true
+        "ffn_down.bias" -> "encoder.layers.$layer.fc2.bias" to false
+        else -> null
+    }
 }
 
 /** Collect params (weights + biases) of [m] and submodules in deterministic walk order. */
@@ -87,9 +92,9 @@ private fun <T : DType, V> walkParams(
 }
 
 /**
- * Overwrite every parameter of [model] with real weights from [src]. Returns the number of
- * parameters baked. Throws if a required tensor is missing (fail fast — a partial bake would
- * silently produce a wrong model).
+ * Overwrite every parameter of [model] with real weights from [src], mapped by name. Returns the
+ * number of parameters baked. Throws if a DSL param has no mapping or its tensor is missing (fail
+ * fast — a partial bake would silently produce a wrong model).
  */
 internal fun <T : DType, V> bakeWeights(
     model: Module<T, V>,
@@ -97,14 +102,10 @@ internal fun <T : DType, V> bakeWeights(
     dtypeClass: KClass<T>,
     ctx: ExecutionContext,
 ): Int {
-    var layer = -1
     var baked = 0
     for (p in walkParams(model)) {
-        // Each encoder layer block starts at `attn_norm.weight` — use it to advance the layer.
-        if (p.name == "attn_norm.weight") layer++
-        val effectiveLayer = if (p.name.startsWith("enc_out_norm")) -1 else layer
-        val (hfName, transpose) = hfNameFor(p.name, effectiveLayer)
-            ?: error("no HF mapping for DSL param '${p.name}' (layer=$effectiveLayer)")
+        val (hfName, transpose) = hfNameFor(p.name)
+            ?: error("no HF mapping for DSL param '${p.name}' (need transformers 0.34.1 layer-qualified names)")
 
         val shape = p.value.shape.dimensions
         var data = src.weight(hfName)

@@ -68,14 +68,13 @@ vendor one; everything else (preprocessor, decoder) is unchanged.
 [IMPORTANT]
 ====
 Weight-baking and the board-layout transpose are *implemented* (`CHECKPOINT` / `ENC_BOARD_LAYOUT`),
-but two things still need the moonshine-tiny checkpoint on the build machine to be *trusted*:
+but two things still need attention:
 
+. **Requires transformers 0.34.1.** The baker maps by NAME using the layer-qualified parameter
+  names introduced in 0.34.1 (`enc.$layer.attn.q_proj.weight`, …). The demo pins 0.34.0 until
+  0.34.1 lands on Maven Central — then bump `skainetTransformers` to `0.34.1`. Run against 0.34.0's
+  un-qualified names, the baker fails fast with a clear message.
 . **HF tensor names.** The checkpoint→DSL mapping in `MoonshineWeights.kt` (`hfNameFor`) uses the
   expected moonshine-tiny HF names; verify them against your actual checkpoint (values are
   untestable without it). Missing tensors fail fast.
-. **Multi-layer naming collision.** The published `moonshineEncoder()` does not layer-qualify the
-  attention / LayerNorm parameter names (`attn.q_proj.weight`, `attn_norm.weight` repeat every
-  layer), so the baker maps them *positionally* (advancing the layer at each `attn_norm.weight`).
-  The clean fix is to layer-qualify those names in the DSL module upstream; until then the
-  positional mapping depends on the walk order.
 ====
