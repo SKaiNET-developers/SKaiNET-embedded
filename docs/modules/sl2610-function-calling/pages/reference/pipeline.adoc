@@ -1,0 +1,47 @@
+= Reference: pipeline & subcommands
+:description: The board binary's subcommands and the ASR → LLM → action pipeline contract.
+
+== Subcommands
+
+The board binary (`voicecc`) dispatches on its first argument:
+
+[cols="1,3"]
+|===
+| `pipeline <wav>` | Full pipeline on one wav: ASR (NPU) → LLM (our vmfb, CPU) → action.
+| `listen [mic\|<wav>] [device]` | Live mic → VAD → per-utterance pipeline (the mic/VAD helper is the last Python bit).
+| `asr <wav>` | Moonshine ASR on the Torq NPU only; prints the transcript.
+| `gen [dir]` | On-device greedy decode loop — generates the full `<tool_N>(args)` call.
+| `gemma [dir]` | Runs the FunctionGemma vmfb on the board; prints the argmax token.
+| `iree-smoke [dir]` | Board-side IREE runtime binding smoke test.
+| (none) | Host smoke run: wires the router and dispatches a few demo intents.
+|===
+
+== Pipeline contract
+
+[source]
+----
+wav → MoonshineRunner.transcribe(wav) : String        // ASR on the NPU (Python-free)
+    → GemmaDecoder.generate(text)      : {tool, args}  // function-calling LLM (our vmfb, CPU)
+    → Intent(tool, args)               → ActionRouter  // dispatch to a handler
+----
+
+== ASR path (Python-free)
+
+`voicecc/asr/` drives the prebuilt Synaptics vmfbs through the native `torq-run-module`
+with raw-binary tensor I/O:
+
+[source]
+----
+wav → preprocessor.vmfb (CPU) → encoder.vmfb (NPU) → decoder.vmfb
+    → decoder_with_past.vmfb (autoregressive) → argmax → tokenizer decode
+----
+
+== Layout
+
+[cols="1,3"]
+|===
+| `src/commonMain/voicecc/` | `actions/` (ActionRouter, the six tools) + `App.kt`
+| `src/jvmMain/`            | host main + `readSystemStatus` actual + `export/` (DAG→StableHLO bridge)
+| `src/linuxArm64Main/`     | board main + `Pipeline` + `asr/` (Moonshine on the NPU)
+| `scripts/deploy.sh`       | host → board deploy
+|===

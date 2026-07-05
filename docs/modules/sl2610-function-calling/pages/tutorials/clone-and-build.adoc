@@ -1,0 +1,50 @@
+= Tutorial: clone and build the board app
+:description: From a fresh clone to a native aarch64 binary that deploys and runs on the SL2610.
+
+The demo is a self-contained Gradle project that resolves the SKaiNET stack from
+published Maven Central artifacts — no sibling checkouts needed.
+
+== 1. Clone and run the host reference
+
+The `jvm` target runs the shared logic on your laptop with no hardware:
+
+[source,bash]
+----
+git clone <repo> && cd sl2610-function-calling
+./gradlew jvmRun
+----
+
+== 2. Build the native board binary
+
+Kotlin/Native cross-compiles a single aarch64 Linux executable:
+
+[source,bash]
+----
+./gradlew linkReleaseExecutableLinuxArm64
+----
+
+== 3. Build, deploy and run on the board
+
+One command cross-compiles and pushes+runs on the SL2610 (set `BOARD=root@<ip>` if
+not the default):
+
+[source,bash]
+----
+./gradlew deployBoard
+----
+
+[NOTE]
+====
+The Gradle build produces the *binary*. Running Moonshine on the board also needs the
+model artifacts (vmfbs / weights / gguf) present on the device — those are deployed,
+not baked into the build.
+====
+
+== Developing against a local SKaiNET checkout
+
+To build against sibling source checkouts instead of published artifacts:
+
+[source,bash]
+----
+./gradlew deployBoard -PuseLocalStack=true   # needs ../../SKaiNET and ../../SKaiNET-transformers
+----

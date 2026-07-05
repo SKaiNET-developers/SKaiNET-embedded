@@ -1,0 +1,13 @@
+= SKaiNET Embedded
+:description: On-device SKaiNET applications and demos for embedded / edge hardware.
+
+SKaiNET Embedded is where the SKaiNET stack meets real edge hardware — on-device
+applications and demos that author models in the NN DSL, compile them through the
+SKaiNET pipeline, and run them on low-power boards and NPUs.
+
+== Modules
+
+[.card-grid]
+* xref:sl2610-function-calling:index.adoc[*SL2610 function calling*] — an offline
+  voice command-and-control demo on the Synaptics SL2610 NPU board: speech-to-text →
+  a function-calling LLM → an action router, end to end, in Kotlin.

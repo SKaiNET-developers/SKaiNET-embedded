@@ -1,0 +1,27 @@
+site:
+  title: SKaiNET Embedded
+  start_page: skainet-embedded::index.adoc
+
+runtime:
+  cache_dir: ./.cache/antora
+
+content:
+  sources:
+    - url: /antora
+      start_path: docs
+      branches: HEAD
+
+asciidoc:
+  attributes:
+    stem: latexmath
+  extensions:
+    - /opt/antora/local-mermaid-extension.js
+
+ui:
+  bundle:
+    url: https://github.com/SKaiNET-developers/skainet-docs-ui/releases/download/v1.1.1/ui-bundle.zip
+    snapshot: true
+  supplemental_files: ./supplemental-ui
+
+output:
+  dir: ./build/site

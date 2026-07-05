@@ -1,0 +1,10 @@
+name: skainet-embedded
+title: SKaiNET Embedded
+version: ~
+nav:
+  - modules/ROOT/nav.adoc
+  - modules/sl2610-function-calling/nav.adoc
+
+asciidoc:
+  attributes:
+    framework_name: SKaiNET

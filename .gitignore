@@ -1,2 +1,6 @@
 .claude/
 build/
+
+## antora (root docs site)
+docs/build/
+docs/.cache/

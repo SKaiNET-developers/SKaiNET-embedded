@@ -1,0 +1,53 @@
+= How to make it your own
+:description: Fork the demo — swap the tools, the models, or the board — keeping the KMP scaffold.
+
+The app is layered so you keep the skeleton (KMP scaffold, the speech → LLM → action
+pipeline, the host↔board dev loop) and replace only the parts specific to _this_ board
+and _this_ toolset. Three seams; most projects touch only the first.
+
+== Seam 1 — your tools (the common case)
+
+The function-calling runtime is a router from a tool name to a Kotlin lambda. The model
+emits `Intent(tool, args)`; you decide what it does. Pure `commonMain`.
+
+[source,kotlin]
+----
+val router = ActionRouter().apply {
+    register("set_lights") { intent ->
+        val color = intent.args["color"] as? String ?: "white"
+        gpio.setRgb(color)                        // <- your hardware
+        ActionResult("set_lights", ok = true, message = "lights $color")
+    }
+}
+----
+
+Override a handler on `LoggingActions` to make an existing tool do something real; the
+default handlers are `open` for exactly this. Platform reads go through
+`expect fun readSystemStatus()`.
+
+== Seam 2 — your models
+
+ASR (`MoonshineRunner().transcribe(wav)`) and the function-calling LLM
+(`GemmaDecoder(...).generate(text)`) plug in independently — swap either, as long as the
+LLM yields `{tool, args}`.
+
+== Seam 3 — your board / NPU
+
+Only the compile step and one plugin know the accelerator. The model emits portable
+StableHLO; a vendor plugin contributes the target's passes + flags, installed once:
+
+[source,kotlin]
+----
+TorqPlugin.install()
+val tiled = dagPipelineFor(TorqPlugin.TARGET).optimize(graph).graph
+val mlir  = toStableHlo(tiled, "encoder").content
+----
+
+For a different accelerator, depend on a plugin for its target string — the shared
+model and app code never change.
+
+== Keep the host loop
+
+Whatever you swap, keep the `jvm()` target as your reference harness: it runs the same
+`commonMain` logic with no hardware, so you iterate in seconds and only deploy once the
+logic is right.

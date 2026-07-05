@@ -1,0 +1,37 @@
+= Kotlin on the edge
+:description: Why the whole edge-AI loop — ASR, a function-calling LLM, the action layer — is written in Kotlin.
+
+An offline voice assistant that calls real functions on a low-power NPU board is, by
+now, ordinary. The unusual part is that _every layer is Kotlin._
+
+== Why that's an odd sentence
+
+Edge AI is a C++ and Python world: models authored in PyTorch, converted through a
+chain of tools, driven from C. This project pushes Kotlin all the way down.
+
+* *Kotlin/Native* compiles the whole thing to a single aarch64 binary that runs on the
+  board — no interpreter shipped, no venv to reproduce.
+* *Kotlin Multiplatform*: the same shared code has a `jvm()` target you run and debug on
+  your laptop as a reference, and a `linuxArm64` target that deploys to the board.
+* The speech model is authored in a *Kotlin DSL*, then compiled — Kotlin objects to
+  StableHLO to an IREE module — and run on the NPU.
+* Talking to the on-device runtime is plain *cinterop* — no bridge process in between.
+
+== The parts a Kotlin developer will recognize
+
+* `expect fun readSystemStatus()` with a JVM actual and a board actual — the ordinary
+  KMP pattern, here reading real board sensors.
+* An `ActionRouter` that's a `Map<String, (Intent) -> ActionResult>`. That's the whole
+  "function calling" runtime; it fits on a napkin.
+* A `linuxArm64` `main` that's a few cinterop calls and a decode loop.
+
+== What's still rough
+
+* Mic capture + voice-activity detection is currently a small Python helper shelled out
+  from the board — the one bit of Python left, on its way out.
+* The board is memory-tight, so the heavy models run one at a time.
+* Getting a transformer to compile cleanly for this NPU took real fights with the
+  compiler (attention layouts, low-precision LayerNorm, rotary embeddings).
+
+The neural-net stack underneath is SKaiNET, but the story here isn't the library — it's
+that the whole edge-AI loop fit in one language, and that language was Kotlin.

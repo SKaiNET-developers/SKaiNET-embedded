@@ -1,0 +1,23 @@
+= SL2610 function calling
+:description: An offline voice → LLM → action demo on the Synaptics SL2610 NPU, authored in Kotlin.
+
+You say _"turn the lights red and set an alarm for ten minutes."_ A small board on
+your desk — no cloud, no network — hears you, transcribes the words, decides which
+functions to call with which arguments, and calls them. Speech recognition and a
+small language model, both on-device, on a low-power NPU. And every layer is Kotlin.
+
+The pipeline is four honest steps:
+
+[source]
+----
+mic → speech-to-text (on the NPU) → a function-calling LLM → an action router → your handler
+----
+
+[.card-grid]
+* xref:tutorials/clone-and-build.adoc[*Tutorials*] — clone and build the board app.
+* xref:how-to/make-it-your-own.adoc[*How-to*] — fork it: swap the tools, models, board.
+* xref:reference/pipeline.adoc[*Reference*] — subcommands and the pipeline contract.
+* xref:explanation/kotlin-on-the-edge.adoc[*Explanation*] — why it's all Kotlin.
+
+The demo is *MIT licensed* and self-contained: `./gradlew jvmRun` works with nothing
+attached.

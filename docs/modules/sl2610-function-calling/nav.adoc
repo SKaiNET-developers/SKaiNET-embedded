@@ -1,0 +1,10 @@
+.SL2610 function calling
+* xref:index.adoc[Overview]
+* Tutorials
+** xref:tutorials/clone-and-build.adoc[Clone and build the board app]
+* How-to guides
+** xref:how-to/make-it-your-own.adoc[Make it your own (template)]
+* Reference
+** xref:reference/pipeline.adoc[Pipeline & subcommands]
+* Explanation
+** xref:explanation/kotlin-on-the-edge.adoc[Kotlin on the edge]
