@@ -7,6 +7,24 @@ decoder pair (NPU). The encoder is authored in the SKaiNET NN DSL
 shipping Synaptics' opaque `encoder.vmfb`. (The decoder is not yet in the DSL — it stays
 prebuilt for now.)
 
+== 0. Prepare the weights (checkpoint → per-tensor .bin)
+
+Host build tooling — convert the moonshine-tiny safetensors checkpoint into the per-tensor
+little-endian f32 `.bin` files the baker reads (`pip install safetensors numpy`):
+
+[source,bash]
+----
+# verify the checkpoint's tensor names match MoonshineWeights.hfNameFor():
+python scripts/convert_moonshine_weights.py model.safetensors --list
+
+# write the .bin files:
+python scripts/convert_moonshine_weights.py model.safetensors --out weights/
+----
+
+Each tensor lands as `weights/<hf-name>.bin` (the `model.` prefix is stripped by default). The
+`--list` output is the ground truth for confirming `hfNameFor` — if a name differs, adjust the
+mapping there. (bf16 checkpoints: add `--framework pt`, which needs torch.)
+
 == 1. Emit the encoder StableHLO from the DSL (host)
 
 [source,bash]
