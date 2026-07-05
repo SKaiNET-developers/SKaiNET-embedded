@@ -1,0 +1,57 @@
+# Dockerized Torq gen_config (STABLE v2.0.0) — derive the per-op NSS/host executor map.
+#
+# The compiler wheel (Dockerfile.iree) can iree-compile but has no gen_config. gen_config lives
+# in the FULL release bundle (release.tar.gz), which also ships iree-compile + the SL2610
+# simulator (libcoralnpu_simulator_mpact.so) so `discover` runs with no board.
+#
+#   docker build -f scripts/.docker/Dockerfile.genconfig -t sl2610-genconfig:v2.0.0 scripts/.docker
+#   # then run discover on a static bf16 ONNX to emit the executor-map JSON:
+#   docker run --rm -v "$PWD:/work" sl2610-genconfig:v2.0.0 \
+#     python -m torq.gen_config discover --model enc_xf_static.onnx \
+#       --auto-convert-bf16 --save-bf16-model enc_bf16.onnx --skip-mode \
+#       --output-dir /work/genconf --log-file /work/genconf/discover.log
+#   # the resulting torq_gen_config_*_compiler.json feeds iree-compile --torq-executor-map=...
+FROM python:3.12-slim
+
+ARG TORQ_VERSION=2.0.0
+ARG RELEASE_URL=https://github.com/synaptics-torq/torq-compiler/releases/download/v${TORQ_VERSION}/release.tar.gz
+
+# lld: torq host/CSS codegen shells out to `lld` (memory: symlink the variants).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates lld binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && for n in lld ld.lld ld64.lld lld-link; do ln -sf "$(command -v ld.lld || command -v lld)" /usr/local/bin/$n; done
+
+# Full v2.0.0 release bundle → /opt/torq/release  ($OT). Has python/{torq,compiler,runtime},
+# lib/ (iree + simulator .so), tools/, scripts/.
+RUN mkdir -p /opt/torq \
+ && curl -fSL "${RELEASE_URL}" -o /tmp/release.tar.gz \
+ && tar xzf /tmp/release.tar.gz -C /opt/torq \
+ && rm /tmp/release.tar.gz
+ENV OT=/opt/torq/release
+
+# Register bundled iree (runtime+compiler) and the torq package (incl. gen_config) on sys.path,
+# exactly as setup.sh does via iree.pth / torq.pth.
+RUN SP=$(python -c "import site; print(site.getsitepackages()[0])") \
+ && printf '%s\n%s\n' "$OT/python/runtime" "$OT/python/compiler" > "$SP/iree.pth" \
+ && printf '%s\n' "$OT/python" > "$SP/torq.pth"
+
+# Binaries find their .so via LD_LIBRARY_PATH (setup.sh's RPATH workaround); tools on PATH.
+ENV LD_LIBRARY_PATH=/opt/torq/release/lib
+ENV PATH=/opt/torq/release/tools:/opt/torq/release/scripts:$PATH
+
+# gen_config discover deps — the SUBSET that matters (skip tensorflow/jax/keras/sphinx/streamlit).
+RUN pip install --no-cache-dir \
+      pytest==7.4.4 pytest-xdist==3.4.0 pytest-json-report==1.5.0 \
+      onnx==1.19.1 onnxruntime==1.25.0 onnxscript==0.6.1 \
+      "numpy>=2.0.0" "ml_dtypes>=0.4.0" huggingface_hub==1.3.2 \
+      onnxsim onnxoptimizer \
+      packaging PyYAML sympy==1.13.3 "nanobind==2.0" "pybind11>=2.10.1" requests wheel setuptools \
+ && pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu torch==2.11.0+cpu
+
+# Sanity: gen_config + iree-compile both import/run.
+RUN python -m torq.gen_config --help >/dev/null && python -c "import iree.compiler" \
+ && echo "gen_config + iree OK"
+
+WORKDIR /work
+CMD ["python", "-m", "torq.gen_config", "--help"]
