@@ -18,26 +18,16 @@ IMAGE=${GENCONFIG_IMAGE:-sl2610-genconfig:v2.0.0}
 FRAMES=${ENC_FRAMES:-165}
 
 ONNX_DIR=$(cd "$(dirname "$ONNX")" && pwd); ONNX_BASE=$(basename "$ONNX")
+DOCKER_DIR=$(cd "$(dirname "$0")/.docker" && pwd)   # static_onnx.py lives here
 mkdir -p "$OUT"; OUT_ABS=$(cd "$OUT" && pwd)
 
 docker run --rm \
-  -v "$ONNX_DIR:/in:ro" -v "$OUT_ABS:/out" \
+  -v "$ONNX_DIR:/in:ro" -v "$OUT_ABS:/out" -v "$DOCKER_DIR:/tools:ro" \
   -e ONNX_BASE="$ONNX_BASE" -e FRAMES="$FRAMES" \
   "$IMAGE" bash -lc '
     set -e
-    # 1) static-ONNX fix: freeze batch=1 + simplify (folds the dynamic pos-id Range/Shape).
-    python - <<PY
-import onnx, onnxsim, os
-m = onnx.load(f"/in/{os.environ[\"ONNX_BASE\"]}")
-inp = m.graph.input[0].name
-dims = m.graph.input[0].type.tensor_type.shape.dim
-feat = dims[2].dim_value or 288
-shape = [1, int(os.environ["FRAMES"]), feat]
-ms, ok = onnxsim.simplify(m, overwrite_input_shapes={inp: shape})
-assert ok, "onnxsim simplify failed"
-onnx.save(ms, "/out/enc_static.onnx")
-print(f"[static] {inp}={shape}  {len(m.graph.node)}→{len(ms.graph.node)} nodes")
-PY
+    # 1) static-ONNX fix (standalone script, no heredoc escaping): freeze batch=1 + onnxsim.
+    python /tools/static_onnx.py "/in/$ONNX_BASE" /out/enc_static.onnx "$FRAMES"
     # 2) discover the per-op NSS/host executor map (bf16 auto-convert; runs on the simulator).
     python -m torq.gen_config discover --model /out/enc_static.onnx \
       --auto-convert-bf16 --save-bf16-model /out/enc_bf16.onnx --skip-mode \
