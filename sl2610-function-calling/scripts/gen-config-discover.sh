@@ -24,7 +24,7 @@ mkdir -p "$OUT"; OUT_ABS=$(cd "$OUT" && pwd)
 docker run --rm \
   -v "$ONNX_DIR:/in:ro" -v "$OUT_ABS:/out" -v "$DOCKER_DIR:/tools:ro" \
   -e ONNX_BASE="$ONNX_BASE" -e FRAMES="$FRAMES" \
-  "$IMAGE" bash -lc '
+  "$IMAGE" bash -c '
     set -e
     # 1) static-ONNX fix (standalone script, no heredoc escaping): freeze batch=1 + onnxsim.
     python /tools/static_onnx.py "/in/$ONNX_BASE" /out/enc_static.onnx "$FRAMES"
