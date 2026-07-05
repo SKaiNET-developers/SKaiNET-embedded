@@ -4,6 +4,7 @@
 ** xref:tutorials/clone-and-build.adoc[Clone and build the board app]
 * How-to guides
 ** xref:how-to/make-it-your-own.adoc[Make it your own (template)]
+** xref:how-to/self-compile-moonshine.adoc[Self-compile the Moonshine encoder]
 * Reference
 ** xref:reference/pipeline.adoc[Pipeline & subcommands]
 * Explanation

@@ -17,6 +17,9 @@ skainet-transformers-agent = { module = "sk.ainet.transformers:skainet-transform
 skainet-transformers-core = { module = "sk.ainet.transformers:skainet-transformers-core" }
 skainet-transformers-runtime-kllama = { module = "sk.ainet.transformers:skainet-transformers-runtime-kllama" }
 skainet-transformers-inference-gemma = { module = "sk.ainet.transformers:skainet-transformers-inference-gemma" }
+# Moonshine encoder authored in the NN DSL — the demo self-compiles this to a Torq vmfb
+# (host tooling) instead of using the prebuilt vendor encoder.vmfb.
+skainet-transformers-inference-moonshine = { module = "sk.ainet.transformers:skainet-transformers-inference-moonshine" }
 # Gemma-on-IREE runtime (GemmaDecoder + IreeRuntime + CompactCodec) — the reusable
 # decode side of the DSL -> StableHLO -> IREE path (replaces the demo-local copies).
 skainet-transformers-runtime-gemma-iree = { module = "sk.ainet.transformers:skainet-transformers-runtime-gemma-iree" }
@@ -24,6 +27,9 @@ skainet-lang-core = { module = "sk.ainet.core:skainet-lang-core" }
 # Host-only model-compiler tooling (DAG -> StableHLO). Not on the native board binary.
 skainet-compile-hlo = { module = "sk.ainet.core:skainet-compile-hlo" }
 skainet-compile-dag = { module = "sk.ainet.core:skainet-compile-dag" }
+# Tape recording (Execution) + DtypeForwardPropagationPass — the host trace→StableHLO recipe.
+skainet-compile-core = { module = "sk.ainet.core:skainet-compile-core" }
+skainet-compile-opt = { module = "sk.ainet.core:skainet-compile-opt" }
 skainet-backend-cpu = { module = "sk.ainet.core:skainet-backend-cpu" }
 skainet-backend-native-cpu = { module = "sk.ainet.core:skainet-backend-native-cpu" }
 skainet-io-gguf = { module = "sk.ainet.core:skainet-io-gguf" }

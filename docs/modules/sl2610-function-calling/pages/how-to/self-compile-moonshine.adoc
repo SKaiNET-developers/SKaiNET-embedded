@@ -1,0 +1,69 @@
+= How to self-compile the Moonshine encoder
+:description: Replace the prebuilt vendor encoder.vmfb with one the demo builds from the NN DSL.
+
+The ASR path drives three vmfbs: a preprocessor (CPU), the **encoder** (NPU), and the
+decoder pair (NPU). The encoder is authored in the SKaiNET NN DSL
+(`skainet-transformers-inference-moonshine`), so the demo can build it itself instead of
+shipping Synaptics' opaque `encoder.vmfb`. (The decoder is not yet in the DSL — it stays
+prebuilt for now.)
+
+== 1. Emit the encoder StableHLO from the DSL (host)
+
+[source,bash]
+----
+./gradlew moonshineEncoderMlir            # → build/mlir/moonshine-encoder.mlir (6 layers, bf16)
+# bring-up variants:
+ENC_LAYERS=1 ENC_DTYPE=FP32 ./gradlew moonshineEncoderMlir
+----
+
+This authors `moonshineEncoder()`, traces it, runs the core dtype pass, and emits portable
+StableHLO — no target-specific ops (the Torq specifics are compile flags, below).
+
+== 2. Compile to a Torq vmfb — in Docker (no host toolchain)
+
+The IREE/Torq compiler runs in an image, so the only host requirement is Docker. Build the
+image once (needs the private `torq_compiler` wheel — not on PyPI):
+
+[source,bash]
+----
+cp /path/to/torq_compiler-*.whl scripts/.docker/
+docker build -f scripts/.docker/Dockerfile.iree -t sl2610-iree:local scripts/.docker
+----
+
+Then compile:
+
+[source,bash]
+----
+scripts/iree-compile-torq-docker.sh build/mlir/moonshine-encoder.mlir build/mlir/encoder.vmfb
+----
+
+The image bakes the required `--torq-disable-slices` flag and the `ld → iree-lld` shim
+(a Torq vmfb links aarch64 host code the system linker rejects).
+
+== 3. Deploy and select it on the board
+
+[source,bash]
+----
+scp build/mlir/encoder.vmfb root@BOARD:/home/root/moon/encoder-selfcompiled.vmfb
+# run the board binary with the env override:
+MOONSHINE_ENCODER_VMFB=/home/root/moon/encoder-selfcompiled.vmfb voicecc pipeline test.wav
+----
+
+`MoonshineDecoder` picks up `MOONSHINE_ENCODER_VMFB` and uses our encoder in place of the
+vendor one; everything else (preprocessor, decoder) is unchanged.
+
+== What's still required for a runnable drop-in
+
+[IMPORTANT]
+====
+Step 1 emits the encoder *graph* with weights as function arguments (structure verified).
+Two things make it a runnable replacement, both needing the moonshine-tiny checkpoint on the
+build machine:
+
+. **Weights.** Bake the real weights into the graph (safetensors → the DSL parameters; the
+  validated mapping is projections `arg = onnxᵀ`, `fc1`/`fc2` transposed, LayerNorm weight-only).
+  See `weightsFor(...)` in `MoonshineEncoderExport.kt`.
+. **Frames / layout.** The vendor preprocessor emits `[1, dim, 207]` (5 s audio); the DSL
+  encoder takes `[1, frames, dim]`. Set `ENC_FRAMES=207` and add the `[dim,frames] → [frames,dim]`
+  transpose so shapes match `MoonshineDecoder`'s encoder call.
+====

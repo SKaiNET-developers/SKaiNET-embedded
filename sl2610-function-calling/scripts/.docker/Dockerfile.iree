@@ -1,0 +1,32 @@
+# Dockerized IREE / Torq compile toolchain — reproducible mlir → vmfb, no host setup.
+#
+# The Torq iree-compile is a private wheel (torq_compiler, matched to the board's
+# torq-runtime). It is NOT on PyPI, so the image installs it from a wheel you provide
+# in the build context (or a private index). Build with:
+#
+#   cp /path/to/torq_compiler-*.whl scripts/.docker/          # bring the wheel in
+#   docker build -f scripts/.docker/Dockerfile.iree -t sl2610-iree:local scripts/.docker
+#
+# Then compile via scripts/iree-compile-torq-docker.sh (which runs this image).
+FROM python:3.12-slim
+
+# Build tools for the cross-linker path + a system `ld` we shim to iree-lld at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      binutils ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The Torq compiler wheel(s). Drop torq_compiler-*.whl (and any iree-*.whl it needs)
+# into scripts/.docker/ before building; pip resolves them here.
+COPY *.whl /wheels/
+RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+
+# iree-compile + the bundled multi-target iree-lld live inside the installed package.
+# Resolve their dir once so the entrypoint can PATH-shim `ld` -> `iree-lld -flavor gnu`
+# (a Torq vmfb links aarch64 host code; the system x86 ld rejects EM:183).
+ENV MLIRLIBS=/usr/local/lib/python3.12/site-packages/iree/compiler/_mlir_libs
+
+COPY compile-entry.sh /usr/local/bin/compile-entry.sh
+RUN chmod +x /usr/local/bin/compile-entry.sh
+
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/compile-entry.sh"]

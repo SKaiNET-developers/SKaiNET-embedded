@@ -1,10 +1,16 @@
 package voicecc.asr
 
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.toKString
 import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readByteArray
+import platform.posix.getenv
 import sk.ainet.apps.llm.tokenizer.GGUFTokenizer
+
+@OptIn(ExperimentalForeignApi::class)
+private fun envOrNull(name: String): String? = getenv(name)?.toKString()
 
 /**
  * Moonshine-tiny speech-to-text on the SL2610, entirely without Python. Mirrors
@@ -27,13 +33,18 @@ import sk.ainet.apps.llm.tokenizer.GGUFTokenizer
  */
 internal class MoonshineDecoder(
     modelDir: String = "/home/root/sl2610-examples/models/Synaptics/moonshine-tiny-bf16-torq",
+    // Encoder vmfb. Defaults to the vendor prebuilt; point at OUR self-compiled encoder
+    // (./gradlew moonshineEncoderMlir -> iree-compile-torq-docker.sh) by setting
+    // MOONSHINE_ENCODER_VMFB, e.g. /home/root/moon/encoder-selfcompiled.vmfb.
+    encoderVmfb: String? = envOrNull("MOONSHINE_ENCODER_VMFB"),
     private val preprocVmfb: String = "/home/root/moon/preprocessor_cpu.vmfb",
     private val work: String = "/home/root/moon/rt",
     torqBin: String = "/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/torq/_runtime_libs/torq-run-module",
     torqLibs: String = "/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/torq/_runtime_libs:" +
         "/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/iree/_runtime_libs",
 ) {
-    private val encVmfb = "$modelDir/encoder.vmfb"
+    // Self-compiled encoder if provided (env/ctor), else the vendor prebuilt.
+    private val encVmfb = encoderVmfb ?: "$modelDir/encoder.vmfb"
     private val decVmfb = "$modelDir/decoder.vmfb"
     private val decPastVmfb = "$modelDir/decoder_with_past.vmfb"
     private val torq = TorqRunModule(torqBin, torqLibs)

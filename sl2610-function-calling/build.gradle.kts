@@ -52,7 +52,10 @@ kotlin {
             implementation(libs.skainet.backend.native.cpu)
             implementation(libs.skainet.compile.hlo)
             implementation(libs.skainet.compile.dag)
+            implementation(libs.skainet.compile.core) // tape recording (Execution)
+            implementation(libs.skainet.compile.opt)  // DtypeForwardPropagationPass
             implementation(libs.skainet.transformers.core) // transformer Modules (MHA/RoPE/FFN) for trace tooling
+            implementation(libs.skainet.transformers.inference.moonshine) // moonshineEncoder() DSL, self-compiled here
         }
     }
 }
@@ -79,6 +82,22 @@ tasks.register<JavaExec>("hloExport") {
     val out = layout.buildDirectory.dir("mlir").get().asFile
     doFirst { out.mkdirs() }
     args(out.resolve("addrelu.mlir").path)
+}
+
+// Self-compile the Moonshine encoder: author the published moonshineEncoder() DSL and
+// emit portable StableHLO. Downstream: scripts/iree-compile-torq-docker.sh -> encoder.vmfb.
+//   ./gradlew moonshineEncoderMlir                       (6 layers, bf16)
+//   ENC_LAYERS=1 ENC_DTYPE=FP32 ./gradlew moonshineEncoderMlir
+tasks.register<JavaExec>("moonshineEncoderMlir") {
+    group = "bridge"
+    description = "Emit the Moonshine encoder StableHLO from the NN DSL (host tooling)."
+    dependsOn("jvmMainClasses")
+    val main = kotlin.jvm().compilations.getByName("main")
+    classpath(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("voicecc.export.MoonshineEncoderExportKt")
+    val out = layout.buildDirectory.dir("mlir").get().asFile
+    doFirst { out.mkdirs() }
+    args(out.resolve("moonshine-encoder.mlir").path)
 }
 
 // "Trace SDPA first": record a 1-block gemma3 forward and report the op node
