@@ -11,13 +11,24 @@ prebuilt for now.)
 
 [source,bash]
 ----
-./gradlew moonshineEncoderMlir            # → build/mlir/moonshine-encoder.mlir (6 layers, bf16)
-# bring-up variants:
+# Runnable, board-shaped encoder: real weights baked in + board [1,dim,frames] layout:
+CHECKPOINT=/path/to/moonshine-tiny-weights ENC_FRAMES=207 ENC_BOARD_LAYOUT=1 \
+  ./gradlew moonshineEncoderMlir          # → build/mlir/moonshine-encoder.mlir
+
+# structure-only bring-up variants:
+./gradlew moonshineEncoderMlir                          # 6 layers, bf16, placeholder weights
 ENC_LAYERS=1 ENC_DTYPE=FP32 ./gradlew moonshineEncoderMlir
 ----
 
 This authors `moonshineEncoder()`, traces it, runs the core dtype pass, and emits portable
 StableHLO — no target-specific ops (the Torq specifics are compile flags, below).
+
+* `CHECKPOINT=<dir>` bakes real weights (per-tensor little-endian f32 `.bin`, named by the HF
+  tensor name) as graph constants → a runnable vmfb. See `MoonshineWeights.kt` for the HF-name
+  mapping and the layout conventions (projections `arg = onnxᵀ`, `fc1`/`fc2` transposed).
+* `ENC_BOARD_LAYOUT=1` + `ENC_FRAMES=207` make the entry accept the board's `[1, dim, 207]`
+  preprocessor output and transpose it to `[1, frames, dim]` inside the graph — a drop-in for
+  `MoonshineDecoder`'s encoder call.
 
 == 2. Compile to a Torq vmfb — in Docker (no host toolchain)
 
@@ -52,18 +63,19 @@ MOONSHINE_ENCODER_VMFB=/home/root/moon/encoder-selfcompiled.vmfb voicecc pipelin
 `MoonshineDecoder` picks up `MOONSHINE_ENCODER_VMFB` and uses our encoder in place of the
 vendor one; everything else (preprocessor, decoder) is unchanged.
 
-== What's still required for a runnable drop-in
+== Validation caveats
 
 [IMPORTANT]
 ====
-Step 1 emits the encoder *graph* with weights as function arguments (structure verified).
-Two things make it a runnable replacement, both needing the moonshine-tiny checkpoint on the
-build machine:
+Weight-baking and the board-layout transpose are *implemented* (`CHECKPOINT` / `ENC_BOARD_LAYOUT`),
+but two things still need the moonshine-tiny checkpoint on the build machine to be *trusted*:
 
-. **Weights.** Bake the real weights into the graph (safetensors → the DSL parameters; the
-  validated mapping is projections `arg = onnxᵀ`, `fc1`/`fc2` transposed, LayerNorm weight-only).
-  See `weightsFor(...)` in `MoonshineEncoderExport.kt`.
-. **Frames / layout.** The vendor preprocessor emits `[1, dim, 207]` (5 s audio); the DSL
-  encoder takes `[1, frames, dim]`. Set `ENC_FRAMES=207` and add the `[dim,frames] → [frames,dim]`
-  transpose so shapes match `MoonshineDecoder`'s encoder call.
+. **HF tensor names.** The checkpoint→DSL mapping in `MoonshineWeights.kt` (`hfNameFor`) uses the
+  expected moonshine-tiny HF names; verify them against your actual checkpoint (values are
+  untestable without it). Missing tensors fail fast.
+. **Multi-layer naming collision.** The published `moonshineEncoder()` does not layer-qualify the
+  attention / LayerNorm parameter names (`attn.q_proj.weight`, `attn_norm.weight` repeat every
+  layer), so the baker maps them *positionally* (advancing the layer at each `attn_norm.weight`).
+  The clean fix is to layer-qualify those names in the DSL module upstream; until then the
+  positional mapping depends on the walk order.
 ====
