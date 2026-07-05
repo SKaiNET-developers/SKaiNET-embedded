@@ -325,3 +325,20 @@ Torq simulator.
 **Last mile:** tighten per-layer Torq attention precision — the vendor's `bf16×bf16→f32`
 accumulation for the QK/AV matmuls (softmax is already f32), same recipe as the f32
 LayerNorm/RoPE. Then 6 layers stay above tolerance and Torq transcribes correctly.
+
+### RESOLVED (2026-07-05): transcribes correctly on Torq
+
+The last-mile RoPE precision gap is fixed by emitting RoPE the way the reference ONNX
+does — a **full-head** interleaved rotation (`out = x*cos_full + rotate(x)*sin_full`,
+`rotate(x)`: pair `(x0,x1)->(-x1,x0)`, `cos_full/sin_full` repeat each pair). Our old
+form rotated even/odd separately then re-interleaved, which Torq mis-lays-out; the
+full-head form is bit-exact on the sim. Commit `0a648ce` (SKaiNET-transformers).
+
+**Result:** the 6-layer DSL encoder on the Torq sim (`--torq-disable-slices`) now
+transcribes **"One, two, three."** correctly (encoder cos vs reference 0.717 → 0.883),
+matching CPU and the reference. The full Moonshine ASR pipeline runs end-to-end on Torq,
+built entirely from the SKaiNET DSL.
+
+General lesson for Torq: **match the vendor's op structure** for anything the compiler is
+fragile on (RoPE interleave, LayerNorm) rather than a mathematically-equivalent but
+differently-shaped emission.
