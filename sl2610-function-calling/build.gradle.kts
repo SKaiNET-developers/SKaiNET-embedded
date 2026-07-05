@@ -35,6 +35,9 @@ kotlin {
             // jvm (host A/B) and linuxArm64 (the board binary).
             implementation(project.dependencies.platform(libs.skainet.transformers.bom))
             implementation(libs.skainet.transformers.inference.gemma)
+            // Reusable Gemma-on-IREE runtime: CompactCodec (commonMain) +
+            // IreeRuntime/GemmaDecoder (nativeMain) — replaces the demo-local copies.
+            implementation(libs.skainet.transformers.runtime.gemma.iree)
             implementation(libs.skainet.lang.core)
             implementation(libs.skainet.backend.cpu)
             implementation(libs.skainet.io.core)

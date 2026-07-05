@@ -33,10 +33,19 @@ shipping as one cross-compiled aarch64 binary rather than a Python venv. The def
 handlers are log-only (no Coral HAT assumed); register your own to drive real hardware.
 
 ## Status
-- **Phase 0 ✅** — KMP scaffold (`jvm` + `linuxArm64`), ActionRouter ported, dev loop proven:
-  host `jvmRun` and a cross-compiled aarch64 binary that **deploys + runs on the board**.
-- Phase 1 (next) — LLM swap: FunctionGemma → SKaiNET-transformers Kotlin Gemma.
-- Phases 2–4 — StableHLO→IREE bridge, Moonshine-on-NPU from Kotlin, full pipeline + parity/latency gate.
+- **Phase 0 ✅** — KMP scaffold (`jvm` + `linuxArm64`), ActionRouter, dev loop (host `jvmRun` +
+  cross-compiled aarch64 binary that deploys + runs on the board).
+- **Phase 1 ✅** — LLM swap done: consumes upstream `sk.ainet.transformers:…runtime-gemma-iree`
+  (`GemmaDecoder`), demo-local runtime/codec duplication deleted, composite builds, transformers 0.33.0.
+- **Weights: bf16 ✅** — a board A/B proved bf16 weights are a bit-exact drop-in for the f16 vmfb
+  across all six tools; the export bakes bf16 (retiring `make_f16.py`).
+- **ASR: Python-free, but a STOPGAP** — `voicecc/asr/` runs Moonshine with **zero Python**, but on
+  **vendor prebuilt Synaptics vmfbs** (`encoder/decoder/decoder_with_past.vmfb`) via the vendor
+  `torq-run-module`. These are third-party binaries, **not** the SKaiNET stack. Being replaced by
+  Moonshine authored in the SKaiNET NN DSL and compiled by us (see the plan).
+- **In progress** — Moonshine in the NN DSL (`llm-inference:moonshine`); the hardest blocker is the
+  Torq NPU compiler crash on attention (`getWeightMemoryFormat`), attacked first with a CPU-compiled
+  fallback in parallel. Then: Kotlin VAD/mic (last runtime Python), host-native `linuxX64`, parity gate.
 
 ## Targets
 - `jvm()` — fast host dev + A/B reference harness.

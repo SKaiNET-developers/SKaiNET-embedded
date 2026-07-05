@@ -1,6 +1,6 @@
 package voicecc
 
-import voicecc.runtime.IreeRuntime
+import sk.ainet.transformers.gemma.iree.IreeRuntime
 
 fun main(args: Array<String>) {
     // `voicecc iree-smoke [dir]` — board-side IREE runtime binding smoke test:
