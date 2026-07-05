@@ -19,7 +19,9 @@ This is a Kotlin port of the upstream Python demo:
 The original demonstrates fully on-device, cloud-free voice/text control of hardware on a
 Synaptics Coralboard. It uses **FunctionGemma 270M** (fine-tuned for tool routing) for the
 LLM and **Moonshine** for ASR on the Torq NPU, with a **Microphone → Silero VAD → Moonshine
-ASR → FunctionGemma → dispatcher → hardware** pipeline. Its key trick is **functional
+ASR → FunctionGemma → dispatcher → hardware** pipeline. Moonshine is a **Whisper-family**
+speech-to-text model — a Whisper-style **encoder-decoder** (a bidirectional audio encoder +
+an autoregressive text decoder with cross-attention), re-optimised for fast on-device ASR. Its key trick is **functional
 tokens**: each tool is a single special token, so no JSON schema is injected into the prompt,
 which keeps inference fast (~1.3–2.0 s/turn). It exposes six tools — `set_lights`,
 `play_buzzer`, `set_alarm`, `cancel_alarm`, `get_system_status`, `respond` — and ships as
@@ -35,17 +37,27 @@ handlers are log-only (no Coral HAT assumed); register your own to drive real ha
 ## Status
 - **Phase 0 ✅** — KMP scaffold (`jvm` + `linuxArm64`), ActionRouter, dev loop (host `jvmRun` +
   cross-compiled aarch64 binary that deploys + runs on the board).
-- **Phase 1 ✅** — LLM swap done: consumes upstream `sk.ainet.transformers:…runtime-gemma-iree`
-  (`GemmaDecoder`), demo-local runtime/codec duplication deleted, composite builds, transformers 0.33.0.
-- **Weights: bf16 ✅** — a board A/B proved bf16 weights are a bit-exact drop-in for the f16 vmfb
-  across all six tools; the export bakes bf16 (retiring `make_f16.py`).
-- **ASR: Python-free, but a STOPGAP** — `voicecc/asr/` runs Moonshine with **zero Python**, but on
-  **vendor prebuilt Synaptics vmfbs** (`encoder/decoder/decoder_with_past.vmfb`) via the vendor
-  `torq-run-module`. These are third-party binaries, **not** the SKaiNET stack. Being replaced by
-  Moonshine authored in the SKaiNET NN DSL and compiled by us (see the plan).
-- **In progress** — Moonshine in the NN DSL (`llm-inference:moonshine`); the hardest blocker is the
-  Torq NPU compiler crash on attention (`getWeightMemoryFormat`), attacked first with a CPU-compiled
-  fallback in parallel. Then: Kotlin VAD/mic (last runtime Python), host-native `linuxX64`, parity gate.
+- **Phase 1 ✅** — LLM swap: consumes upstream `runtime-gemma-iree` (`GemmaDecoder`); demo-local
+  runtime/codec duplication deleted; builds against **published** `sk.ainet.transformers:*` (0.34.x).
+- **Weights: bf16 ✅** — a board A/B proved bf16 is a bit-exact drop-in for the f16 vmfb; the export
+  bakes bf16.
+- **Moonshine ASR — encoder DONE ✅** — the Moonshine **encoder** is authored in the SKaiNET NN DSL
+  and **published** as `sk.ainet.transformers:skainet-transformers-inference-moonshine` (0.34.0;
+  0.34.1 layer-qualifies its weights). It matches the reference (cos **1.0** f32 CPU, **~0.9998** bf16
+  CPU), **compiles + runs on the SL2610 Torq NPU**, and transcribes correctly end-to-end
+  (*"One, two, three."*). The former hardest blocker — the Torq `getWeightMemoryFormat` crash on
+  attention — is solved.
+- **Self-compile toolchain ✅** — the demo builds the encoder from the DSL itself, no vendor binary:
+  host export (`./gradlew moonshineEncoderMlir`, real weights baked via `CHECKPOINT=`) →
+  **dockerized stable v2.0.0 Torq compiler** pulled from `github.com/synaptics-torq/torq-compiler`
+  (`scripts/iree-compile-torq-docker.sh`) + `gen_config` executor-map discovery
+  (`scripts/gen-config-discover.sh`). Select our vmfb on the board with `MOONSHINE_ENCODER_VMFB`.
+- **Interim ASR path** — `voicecc/asr/` still runs Moonshine **Python-free** on the **vendor prebuilt
+  vmfbs** (`encoder/decoder/decoder_with_past.vmfb`) via `torq-run-module`, so the pipeline works today
+  while the self-compiled path lands.
+- **Next** — the Moonshine **decoder** in the DSL (still external: vendor vmfb / HF reference), then
+  Kotlin VAD/mic (the last runtime Python), host-native `linuxX64`, and the parity/latency gate.
+  Traceable plan: `../../PLAN.md`.
 
 ## Targets
 - `jvm()` — fast host dev + A/B reference harness.
@@ -72,10 +84,12 @@ surfaces `jvmRun` and `link…LinuxArm64`. Run configs live in `.run/`.
 
 ## Layout
 ```
-src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + llm/ (CompactCodec) + App.kt
-src/jvmMain/              host main + readSystemStatus actual + export/ (DAG→StableHLO bridge)
-src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action) + runtime/ (IREE)
-scripts/deploy.sh         host→board deploy (+ libcrypt compat)
+src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + App.kt
+src/jvmMain/              host main + readSystemStatus actual + export/ (DSL→StableHLO:
+                          HloBridge, MoonshineEncoderExport, MoonshineWeights)
+src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action) + asr/ (Moonshine on the NPU)
+scripts/                  deploy.sh · iree-compile-torq-docker.sh · gen-config-discover.sh ·
+                          convert_moonshine_weights.py · .docker/ (Torq compiler + gen_config images)
 ```
 
 ## License
