@@ -28,7 +28,10 @@ docker run --rm \
     set -e
     # 1) static-ONNX fix (standalone script, no heredoc escaping): freeze batch=1 + onnxsim.
     python /tools/static_onnx.py "/in/$ONNX_BASE" /out/enc_static.onnx "$FRAMES"
-    # 2) discover the per-op NSS/host executor map (bf16 auto-convert; runs on the simulator).
+    # 2) discover the per-op NSS/host executor map. gen_config drives pytest on $OT/tests, so it
+    #    MUST run from the release dir ($OT) for its pytest plugin (--model-path etc.) to load.
+    #    Absolute --output-dir/--model keep the artifacts on the /out mount. Runs on the simulator.
+    cd "$OT"
     python -m torq.gen_config discover --model /out/enc_static.onnx \
       --auto-convert-bf16 --save-bf16-model /out/enc_bf16.onnx --skip-mode \
       --output-dir /out --log-file /out/discover.log

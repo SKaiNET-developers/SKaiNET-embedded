@@ -49,6 +49,10 @@ RUN pip install --no-cache-dir \
       packaging PyYAML sympy==1.13.3 "nanobind==2.0" "pybind11>=2.10.1" requests wheel setuptools \
  && pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu torch==2.11.0+cpu
 
+# torq.testing.iree pulls pandas transitively — without it the whole gen_config pytest plugin
+# chain fails to import and pytest rejects --model-path etc.
+RUN pip install --no-cache-dir pandas
+
 # Sanity: gen_config + iree-compile both import/run.
 RUN python -m torq.gen_config --help >/dev/null && python -c "import iree.compiler" \
  && echo "gen_config + iree OK"
