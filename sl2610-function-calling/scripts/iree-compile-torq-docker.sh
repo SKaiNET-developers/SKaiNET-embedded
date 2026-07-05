@@ -18,7 +18,7 @@ set -euo pipefail
 
 IN=${1:?usage: iree-compile-torq-docker.sh <in.mlir> <out.vmfb>}
 OUT=${2:?usage: iree-compile-torq-docker.sh <in.mlir> <out.vmfb>}
-IMAGE=${IREE_IMAGE:-sl2610-iree:local}
+IMAGE=${IREE_IMAGE:-sl2610-iree:v2.0.0}
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "error: image '$IMAGE' not found. Build it first:" >&2

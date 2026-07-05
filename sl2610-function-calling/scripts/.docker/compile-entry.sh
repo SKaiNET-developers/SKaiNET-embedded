@@ -21,6 +21,7 @@ PATH="$SHIM:$PATH" LD_LIBRARY_PATH="$MLIRLIBS" \
     --iree-input-type=stablehlo \
     --iree-hal-target-device=torq --torq-hw=SL2610 \
     --torq-disable-slices \
+    --torq-fallback-f32-to-host \
     "$IN" -o "$OUT"
 
 rm -rf "$SHIM"
