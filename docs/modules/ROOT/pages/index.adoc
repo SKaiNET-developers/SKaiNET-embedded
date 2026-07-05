@@ -11,3 +11,5 @@ SKaiNET pipeline, and run them on low-power boards and NPUs.
 * xref:sl2610-function-calling:index.adoc[*SL2610 function calling*] — an offline
   voice command-and-control demo on the Synaptics SL2610 NPU board: speech-to-text →
   a function-calling LLM → an action router, end to end, in Kotlin.
+* xref:coral-npu-stack::index.adoc[*Coral NPU full stack*] — the DSL → StableHLO → NPU
+  compilation pipeline, hardware notes, and the codegen/IREE tooling reference.

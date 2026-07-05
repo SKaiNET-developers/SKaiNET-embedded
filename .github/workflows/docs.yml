@@ -1,21 +1,23 @@
 name: Docs
 
-# Build the modern SKaiNET-style Antora site (root docs/, incl. the
-# sl2610-function-calling module) and publish to GitHub Pages on develop/main.
+# Build the SKaiNET-style Antora site and publish to GitHub Pages on develop/main.
 # Adapted from SKaiNET's docs workflow (Docker Antora image, offline Mermaid/MathJax).
-#
-# NOTE: the older coralnpu docs are built by pages.yml. Two workflows must not both
-# deploy to Pages — consolidate before enabling both on the same branch.
+# The playbook aggregates every docs component in the repo — the root docs/ site
+# (incl. the sl2610-function-calling module) AND the older coralnpu/docs
+# (coral-npu-stack) — into ONE Pages deployment, so this is the sole docs workflow
+# (the former coralnpu pages.yml was retired).
 
 on:
   push:
     branches: [ main, develop ]
     paths:
       - 'docs/**'
+      - 'coralnpu/docs/**'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
+      - 'coralnpu/docs/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 

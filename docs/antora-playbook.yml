@@ -7,8 +7,15 @@ runtime:
 
 content:
   sources:
+    # This site aggregates every docs component in the repo, so a single Pages
+    # deployment serves all of them (component switcher in the UI).
     - url: /antora
       start_path: docs
+      branches: HEAD
+    # The older Coral NPU full-stack docs (component: coral-npu-stack), folded in
+    # here instead of a second, competing Pages workflow.
+    - url: /antora
+      start_path: coralnpu/docs
       branches: HEAD
 
 asciidoc:
