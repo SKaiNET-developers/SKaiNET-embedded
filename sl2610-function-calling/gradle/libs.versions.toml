@@ -6,7 +6,7 @@ kotlinxCoroutines = "1.10.2"
 # composite build (settings.gradle.kts useLocalStack) these coordinates are
 # substituted by the sibling source checkouts; the version matters only when
 # useLocalStack=false resolves published artifacts.
-skainetTransformers = "0.33.0"
+skainetTransformers = "0.34.0"
 
 [libraries]
 kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
