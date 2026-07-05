@@ -30,6 +30,7 @@ if (providers.gradleProperty("useLocalStack").orNull == "true") {
             substitute(module("sk.ainet.transformers:skainet-transformers-bom")).using(project(":llm-bom"))
             substitute(module("sk.ainet.transformers:skainet-transformers-core")).using(project(":llm-core"))
             substitute(module("sk.ainet.transformers:skainet-transformers-inference-gemma")).using(project(":llm-inference:gemma"))
+            substitute(module("sk.ainet.transformers:skainet-transformers-inference-moonshine")).using(project(":llm-inference:moonshine"))
             substitute(module("sk.ainet.transformers:skainet-transformers-runtime-gemma-iree")).using(project(":llm-runtime:gemma-iree"))
         }
     }
