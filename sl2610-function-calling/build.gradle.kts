@@ -116,6 +116,20 @@ tasks.register<JavaExec>("moonshineDecoderMlir") {
     environment("MOONSHINE_DECODER_OUT_DIR", out.path)
 }
 
+// Self-compile the Moonshine audio FRONTEND (preprocessor) → StableHLO from the NN DSL.
+//   PP_CHECKPOINT=weights ./gradlew moonshinePreprocessorMlir
+tasks.register<JavaExec>("moonshinePreprocessorMlir") {
+    group = "bridge"
+    description = "Emit the Moonshine audio-frontend preprocessor StableHLO from the NN DSL (host tooling)."
+    dependsOn("jvmMainClasses")
+    val main = kotlin.jvm().compilations.getByName("main")
+    classpath(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("voicecc.export.MoonshinePreprocessorExportKt")
+    val out = layout.buildDirectory.dir("mlir").get().asFile
+    doFirst { out.mkdirs() }
+    environment("MOONSHINE_DECODER_OUT_DIR", out.path)
+}
+
 // "Trace SDPA first": record a 1-block gemma3 forward and report the op node
 // types (is scaledDotProductAttention atomic?) + which lack StableHLO converters.
 tasks.register<JavaExec>("sdpaTrace") {
