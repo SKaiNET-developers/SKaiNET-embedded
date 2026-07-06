@@ -49,6 +49,8 @@ internal class MoonshineDecoder(
 ) {
     // Self-compiled encoder if provided (env/ctor), else the vendor prebuilt.
     private val encVmfb = encoderVmfb ?: "$modelDir/encoder.vmfb"
+    // Encoder device: vendor NPU vmfb runs on "torq"; OUR llvm-cpu encoder vmfb needs "local-task".
+    private val encDevice = envOrNull("MOONSHINE_ENCODER_DEVICE") ?: "torq"
     // OUR self-compiled re-decode decoder (single graph). Env override; default the deployed vmfb.
     private val decVmfb = envOrNull("MOONSHINE_DECODER_VMFB") ?: "/home/root/moon/decoder_redecode_cpu.vmfb"
     private val decDevice = envOrNull("MOONSHINE_DECODER_DEVICE") ?: "local-task"
@@ -75,11 +77,19 @@ internal class MoonshineDecoder(
         ) return null
         Bin.writeBytes("$work/enc_in.bin", Bin.f32ToBf16(Bin.readBytes(feat)))
 
-        // 3) encoder on the NPU
-        val encOut = "$work/enc_out.bin"
-        if (!torq.run(encVmfb, "main", "torq",
-                listOf(TorqRunModule.Spec("1x288x207", "bf16", "$work/enc_in.bin")), listOf(encOut))
+        // 3) encoder (vendor prebuilt on the NPU `torq`, or OUR llvm-cpu vmfb on `local-task`)
+        val encRaw = "$work/enc_out.bin"
+        if (!torq.run(encVmfb, "main", encDevice,
+                listOf(TorqRunModule.Spec("1x288x207", "bf16", "$work/enc_in.bin")), listOf(encRaw))
         ) return null
+        // The decoder wants bf16 memory. The vendor NPU encoder already emits bf16; OUR llvm-cpu
+        // encoder emits f32 (its final LayerNorm edge) — widen to bf16 by output size.
+        val encBytes = Bin.readBytes(encRaw)
+        val encOut = if (encBytes.size == 207 * DIM * 4) {
+            Bin.writeBytes("$work/enc_mem.bin", Bin.f32ToBf16(encBytes)); "$work/enc_mem.bin"
+        } else {
+            encRaw
+        }
 
         // 4) autoregressive re-decode: one static graph, causal self-attn masks padded future tokens.
         val logits = "$work/logits.bin"

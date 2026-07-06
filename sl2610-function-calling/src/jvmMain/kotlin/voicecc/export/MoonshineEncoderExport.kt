@@ -116,7 +116,14 @@ private fun <T : DType> traceEncoder(
         Execution.tapeStack.pushTape(ct)
         try {
             val ectx = this as ExecutionContext
-            val x = if (boardLayout) ectx.ops.transpose(input) else input
+            // Board layout [1, dim, frames] → [1, frames, dim]. ops.transpose on a rank-3 tensor
+            // reverses ALL dims ([2,1,0] → [frames, dim, 1]); do it in 2D (squeeze → transpose →
+            // unsqueeze) so it's an unambiguous last-two swap.
+            val x = if (boardLayout) {
+                ectx.ops.unsqueeze(ectx.ops.transpose(ectx.ops.squeeze(input, 0)), 0)
+            } else {
+                input
+            }
             model.forward(x, ectx)
         } finally {
             Execution.tapeStack.popTape()
