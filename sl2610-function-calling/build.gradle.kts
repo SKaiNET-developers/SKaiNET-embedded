@@ -100,6 +100,22 @@ tasks.register<JavaExec>("moonshineEncoderMlir") {
     args(out.resolve("moonshine-encoder.mlir").path)
 }
 
+// Self-compile the Moonshine DECODER: emit BOTH KV-cache graphs (prefill + decoder_with_past)
+// as StableHLO from the NN DSL. Downstream: scripts/compile-moonshine-decoder.sh -> vmfbs.
+//   DECODER_CHECKPOINT=weights ./gradlew moonshineDecoderMlir            (bf16, F=207, P=1)
+//   DEC_DTYPE=FP32 DECODER_CHECKPOINT=weights ./gradlew moonshineDecoderMlir   (f32, bring-up)
+tasks.register<JavaExec>("moonshineDecoderMlir") {
+    group = "bridge"
+    description = "Emit the Moonshine decoder + decoder_with_past StableHLO from the NN DSL (host tooling)."
+    dependsOn("jvmMainClasses")
+    val main = kotlin.jvm().compilations.getByName("main")
+    classpath(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("voicecc.export.MoonshineDecoderExportKt")
+    val out = layout.buildDirectory.dir("mlir").get().asFile
+    doFirst { out.mkdirs() }
+    environment("MOONSHINE_DECODER_OUT_DIR", out.path)
+}
+
 // "Trace SDPA first": record a 1-block gemma3 forward and report the op node
 // types (is scaledDotProductAttention atomic?) + which lack StableHLO converters.
 tasks.register<JavaExec>("sdpaTrace") {
