@@ -34,6 +34,12 @@ if (providers.gradleProperty("useLocalStack").orNull == "true") {
             substitute(module("sk.ainet.transformers:skainet-transformers-runtime-gemma-iree")).using(project(":llm-runtime:gemma-iree"))
         }
     }
+    // Torq NPU target-optimizer plugin (host export-time; ENC_TORQ=1) from the sibling vendors build.
+    includeBuild("../../skainet-embedded-vendors") {
+        dependencySubstitution {
+            substitute(module("sk.ainet.vendors:synaptics-torq")).using(project(":synaptics-torq"))
+        }
+    }
 }
 
 rootProject.name = "sl2610-voice-cc-kt"
