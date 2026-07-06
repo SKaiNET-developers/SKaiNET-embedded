@@ -1,0 +1,42 @@
+# torq-toolchain.lock — SINGLE SOURCE OF TRUTH for the SL2610 Torq compiler↔runtime↔firmware triple.
+# Established by scripts/torq-verify.sh --matrix (2026-07-07). This file — not the prose in
+# docs/torq.md — is the authoritative answer to "which Torq version do we use, and does it work".
+# Re-run scripts/torq-board-audit.sh (drift) and scripts/torq-verify.sh (gate) after ANY change.
+
+# ---- Board (verified via scripts/torq-board-audit.sh) ----
+BOARD_SDK=scarthgap_6.12_v2.4.0
+BOARD_KERNEL=6.12.62
+
+# The board carries THREE distinct Torq runtimes (each a different executable format). The app
+# (src/linuxArm64Main/.../MoonshineDecoder.kt `torqBin`) currently calls the ALPHA one — that is a
+# latent mismatch; the canonical runtime for our v2 compiler is torq2-stable (see runbook).
+#   native-beta  /usr/bin/iree-run-module ................ torq-runtime/2.0.0_beta  accepts exec v1
+#   app-alpha    .../sl2610-voice-cc/.venv/.../torq-run-module  torq_runtime-2.0.0a1  (vendor prebuilts exec v0; runs v2 leniently)
+#   torq2-stable /home/root/torq2-stable/.../torq-run-module    torq_runtime-2.0.0   runs exec v2   <-- canonical
+#   torq2        /home/root/torq2/torq_libs/torq-run-module     stable v2.0.0        runs exec v2
+
+# ---- Canonical (pinned) toolchain for our vmfbs ----
+COMPILER_KIND=stable-docker
+COMPILER_ID=sl2610-iree:v2.0.0                 # Dockerfile.iree: torq_compiler 2.0.0 wheel (github v2.0.0)
+COMPILER_EMITS_EXEC=2
+BOARD_RUNTIME_ID=torq2-stable
+BOARD_RUNTIME_PATH=/home/root/torq2-stable/torq/_runtime_libs/torq-run-module
+BOARD_RUNTIME_VERSION=torq_runtime-2.0.0
+EXEC_FORMAT=2
+
+# ---- Canary gate result (scripts/torq-verify.sh --matrix) ----
+# PARTIAL: single-dispatch graphs execute correctly; 3+-dispatch graphs DO NOT on ANY pair.
+CANARY_STATUS=PARTIAL
+CANARY_DATE=2026-07-07
+CANARY_identity_1x4=PASS      # exec-format loads + trivial matmul correct
+CANARY_chain2_64=PASS         # 2 chained matmuls correct (4096)
+CANARY_chain8_64=FAIL         # 3+ chained matmuls -> ZEROS/ERROR on EVERY runtime (hardware/toolchain limit)
+CANARY_softmax_64=FAIL        # CSS softmax -> ZEROS/ERROR on EVERY runtime
+
+# ---- Consequences (enforced by tooling) ----
+# NPU_MULTIDISPATCH_TRUSTED=no  -> encoder/decoder-class (many-dispatch) vmfbs must NOT be trusted on
+#   --device=torq until CANARY_chain8_64 + CANARY_softmax_64 flip to PASS (needs the SDK-v2.4.0-matching
+#   Torq toolchain, or the SyNAP path). The CPU floor (--device=local-task, verified "One, two, three."
+#   e2e) is the shippable path meanwhile.
+NPU_MULTIDISPATCH_TRUSTED=no
+NOTES=No available (compiler,runtime) pair executes a 3+-dispatch graph. g165e12a (exec v1, board-native compatible) SIGSEGVs compiling 3+matmul/softmax; stable v2.0.0 compiles them but the hardware returns zeros. See memory torq-multidispatch-runtime-zeros + torq-runtime-version-mismatch.

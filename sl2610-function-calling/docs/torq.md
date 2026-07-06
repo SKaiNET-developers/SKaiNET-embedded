@@ -5,6 +5,14 @@ encoder for the Synaptics Torq NPU (SL2610/SL2619). This document is self-contai
 it embeds the reproducer generators, the controlled experiments already run, the one
 root cause already fixed, and the open one. Read it top to bottom.
 
+> **⚠ Toolchain versions:** the authoritative compiler↔runtime↔firmware version for the board is
+> [`scripts/torq-toolchain.lock`](../scripts/torq-toolchain.lock) — NOT the prose in this file
+> (which was written at different times and may name older versions). Before compiling/deploying for
+> `--device=torq`, run `scripts/torq-board-audit.sh` (drift) and `scripts/torq-verify.sh` (canary gate);
+> to change any version follow [`docs/torq-toolchain-update.md`](torq-toolchain-update.md). As of
+> 2026-07-07 the gate is **PARTIAL**: single-dispatch graphs run on the NPU, but 3+-dispatch graphs
+> (the encoder/decoder) return zeros on hardware — `NPU_MULTIDISPATCH_TRUSTED=no`.
+
 ---
 
 ## 0. TL;DR
