@@ -13,23 +13,27 @@ import sk.ainet.apps.llm.tokenizer.GGUFTokenizer
 private fun envOrNull(name: String): String? = getenv(name)?.toKString()
 
 /**
- * Moonshine-tiny speech-to-text on the SL2610, entirely without Python. Mirrors
- * the vendor `utils/moonshine/runner.py` encoder-decoder loop, but drives the
- * prebuilt Synaptics vmfbs through the native [TorqRunModule] subprocess with
- * raw-binary tensor files:
+ * Moonshine-tiny speech-to-text on the SL2610, entirely without Python and with a
+ * fully self-compiled decoder (no vendor Moonshine decoder binaries):
  *
  *   wav → preprocessor.vmfb (CPU) → f32 features → cast bf16 → encoder.vmfb (NPU)
- *       → decoder.vmfb (first step: logits + self/cross KV cache)
- *       → decoder_with_past.vmfb (autoregressive, threading the self KV cache)
+ *       → OUR re-decode decoder.vmfb (CPU): greedy loop, one static graph
  *       → argmax → tokenizer.json decode.
  *
- * The preprocessor is an ONNX graph compiled to an aarch64 llvm-cpu vmfb with the
- * Torq-fork iree-compile (stock IREE 3.11 emits a "Ch" bytecode feature the board
- * runtime rejects). Shapes/dtypes are fixed by the model reflection:
+ * The decoder is our DSL-authored `moonshineDecoder()` compiled as a single
+ * fixed-max-sequence graph (`inputs_embeds [1,SEQ,dim] + memory → logits [1,SEQ,vocab]`).
+ * Each step feeds the token prefix padded to SEQ and reads the last real position's
+ * logits; the decoder's causal self-attention masks the padded future tokens, so one
+ * static vmfb decodes the whole transcript — no KV-cache threading, position scalar,
+ * or with_past graph. (KV-cached `decoder_with_past` is a later latency optimization.)
+ *
+ * Shapes/dtypes:
  *   preproc  [1,80000]f32 → [1,288,207]f32
  *   encoder  [1,288,207]bf16 → [1,207,288]bf16
- *   decoder  ([1,1,288]bf16, [1,207,288]bf16) → [1,1,32768]bf16 + 6×(self_k,self_v,cross_k,cross_v)
- *   dec_past ([1,1,288]bf16, [1,1]i32, 6×4 cache) → [1,1,32768]bf16 + 6×2 self cache
+ *   decoder  ([1,SEQ,288]bf16, [1,207,288]bf16) → [1,SEQ,32768]f32
+ *
+ * The token embeddings are OURS (tied to the decoder's lm_head; they differ from the
+ * vendor's export), bundled as a bf16 npy — set MOONSHINE_EMBED to override.
  */
 internal class MoonshineDecoder(
     modelDir: String = "/home/root/sl2610-examples/models/Synaptics/moonshine-tiny-bf16-torq",
@@ -45,10 +49,14 @@ internal class MoonshineDecoder(
 ) {
     // Self-compiled encoder if provided (env/ctor), else the vendor prebuilt.
     private val encVmfb = encoderVmfb ?: "$modelDir/encoder.vmfb"
-    private val decVmfb = "$modelDir/decoder.vmfb"
-    private val decPastVmfb = "$modelDir/decoder_with_past.vmfb"
+    // OUR self-compiled re-decode decoder (single graph). Env override; default the deployed vmfb.
+    private val decVmfb = envOrNull("MOONSHINE_DECODER_VMFB") ?: "/home/root/moon/decoder_redecode_cpu.vmfb"
+    private val decDevice = envOrNull("MOONSHINE_DECODER_DEVICE") ?: "local-task"
     private val torq = TorqRunModule(torqBin, torqLibs)
-    private val emb = Bf16EmbeddingTable("$modelDir/decoder_token_embeddings.npy", DIM)
+    // OUR token embeddings (tied to the decoder lm_head), bundled bf16 npy.
+    private val emb = Bf16EmbeddingTable(
+        envOrNull("MOONSHINE_EMBED") ?: "/home/root/moon/our_embed_tokens.npy", DIM,
+    )
     private val tokenizer: GGUFTokenizer = GGUFTokenizer.fromTokenizerJson(
         SystemFileSystem.source(Path("$modelDir/tokenizer.json")).buffered().use { it.readByteArray() }.decodeToString(),
     )
@@ -73,84 +81,56 @@ internal class MoonshineDecoder(
                 listOf(TorqRunModule.Spec("1x288x207", "bf16", "$work/enc_in.bin")), listOf(encOut))
         ) return null
 
-        // 4) first decoder step: START token embedding + encoder output → logits + full cache
-        Bin.writeBytes("$work/tok.bin", emb.row(START))
+        // 4) autoregressive re-decode: one static graph, causal self-attn masks padded future tokens.
         val logits = "$work/logits.bin"
-        // decoder outputs (in order): logits, then per layer [self_k, self_v, cross_k, cross_v]
-        val crossFile = Array(2 * N_LAYERS) { "$work/cross_$it.bin" }
-        val decSelf0 = Array(2 * N_LAYERS) { "$work/dself_$it.bin" }
-        val decOutputs = ArrayList<String>(1 + 4 * N_LAYERS).apply {
-            add(logits)
-            for (l in 0 until N_LAYERS) {
-                add(decSelf0[2 * l]); add(decSelf0[2 * l + 1])
-                add(crossFile[2 * l]); add(crossFile[2 * l + 1])
-            }
-        }
-        if (!torq.run(decVmfb, "main", "torq",
-                listOf(
-                    TorqRunModule.Spec("1x1x$DIM", "bf16", "$work/tok.bin"),
-                    TorqRunModule.Spec("1x207x$DIM", "bf16", encOut),
-                ), decOutputs)
-        ) return null
-
-        var next = Bin.argmaxBf16(Bin.readBytes(logits), VOCAB)
-        val tokens = arrayListOf(START, next)
-
-        // 5) seed the self KV cache: pad each [1,8,1,36] to [1,8,30,36] at position 0
-        var selfCur = Array(2 * N_LAYERS) { "$work/selfA_$it.bin" }
-        var selfNext = Array(2 * N_LAYERS) { "$work/selfB_$it.bin" }
-        for (k in 0 until 2 * N_LAYERS) Bin.writeBytes(selfCur[k], padSelfToMax(Bin.readBytes(decSelf0[k])))
-
-        // 6) autoregressive decode with decoder_with_past (max INPUT_LEN/16000*6 = 30 positions)
-        val maxTokens = MAX_POS
-        var i = 0
-        while (i < maxTokens - 1 && next != END) {
-            Bin.writeBytes("$work/tok.bin", emb.row(next))
-            Bin.writeBytes("$work/seq.bin", Bin.i32Scalar(i + 1))
-            val inputs = ArrayList<TorqRunModule.Spec>(2 + 4 * N_LAYERS).apply {
-                add(TorqRunModule.Spec("1x1x$DIM", "bf16", "$work/tok.bin"))
-                add(TorqRunModule.Spec("1x1", "i32", "$work/seq.bin"))
-                for (l in 0 until N_LAYERS) {
-                    add(TorqRunModule.Spec("1x8x${MAX_POS}x36", "bf16", selfCur[2 * l]))
-                    add(TorqRunModule.Spec("1x8x${MAX_POS}x36", "bf16", selfCur[2 * l + 1]))
-                    add(TorqRunModule.Spec("1x8x207x36", "bf16", crossFile[2 * l]))
-                    add(TorqRunModule.Spec("1x8x207x36", "bf16", crossFile[2 * l + 1]))
-                }
-            }
-            val outputs = ArrayList<String>(1 + 2 * N_LAYERS).apply {
-                add(logits)
-                for (k in 0 until 2 * N_LAYERS) add(selfNext[k])
-            }
-            if (!torq.run(decPastVmfb, "main", "torq", inputs, outputs)) return null
-            val tmp = selfCur; selfCur = selfNext; selfNext = tmp // ping-pong
-            next = Bin.argmaxBf16(Bin.readBytes(logits), VOCAB)
-            tokens.add(next)
-            i++
+        val ids = arrayListOf(START)
+        while (ids.size < SEQ) {
+            Bin.writeBytes("$work/dec_in.bin", paddedEmbeds(ids))
+            if (!torq.run(decVmfb, "main", decDevice,
+                    listOf(
+                        TorqRunModule.Spec("1x${SEQ}x$DIM", "bf16", "$work/dec_in.bin"),
+                        TorqRunModule.Spec("1x207x$DIM", "bf16", encOut),
+                    ), listOf(logits))
+            ) return null
+            val next = argmaxF32At(Bin.readBytes(logits), pos = ids.size - 1, vocab = VOCAB)
+            if (next == END) break
+            ids.add(next)
         }
 
-        // 7) detokenize: drop START, stop at END
-        val ids = tokens.drop(1).takeWhile { it != END }
-        if (ids.isEmpty()) return ""
-        return tokenizer.decode(ids.toIntArray()).trim()
+        // 5) detokenize: drop START
+        val out = ids.drop(1)
+        if (out.isEmpty()) return ""
+        return tokenizer.decode(out.toIntArray()).trim()
     }
 
-    /** Zero-pad a `[1,8,1,36]` bf16 self-cache to `[1,8,30,36]`, placing it at position 0. */
-    private fun padSelfToMax(src: ByteArray): ByteArray {
-        val headBytes = HEAD_DIM * 2                 // 36 bf16 = 72 bytes (one position, one head)
-        val dstHeadStride = MAX_POS * HEAD_DIM * 2   // 30*36 bf16 = 2160 bytes per head
-        val dst = ByteArray(8 * dstHeadStride)
-        for (h in 0 until 8) src.copyInto(dst, destinationOffset = h * dstHeadStride,
-            startIndex = h * headBytes, endIndex = h * headBytes + headBytes)
-        return dst
+    /** `[1, SEQ, DIM]` bf16 embeds: rows `0..ids.size-1` = emb(ids[i]), the rest zero. */
+    private fun paddedEmbeds(ids: List<Int>): ByteArray {
+        val rowBytes = DIM * 2
+        val buf = ByteArray(SEQ * rowBytes)
+        for (i in ids.indices) emb.row(ids[i]).copyInto(buf, destinationOffset = i * rowBytes)
+        return buf
+    }
+
+    /** Argmax over `vocab` at sequence position [pos] in a `[SEQ, vocab]` little-endian f32 buffer. */
+    private fun argmaxF32At(b: ByteArray, pos: Int, vocab: Int): Int {
+        var best = 0
+        var bestV = Float.NEGATIVE_INFINITY
+        val base = pos * vocab * 4
+        for (v in 0 until vocab) {
+            val o = base + v * 4
+            val bits = (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8) or
+                ((b[o + 2].toInt() and 0xFF) shl 16) or ((b[o + 3].toInt() and 0xFF) shl 24)
+            val f = Float.fromBits(bits)
+            if (f > bestV) { bestV = f; best = v }
+        }
+        return best
     }
 
     private companion object {
-        const val N_LAYERS = 6
         const val DIM = 288
-        const val HEAD_DIM = 36
         const val VOCAB = 32768
         const val INPUT_LEN = 80000    // preprocessor fixed input (5 s @ 16 kHz)
-        const val MAX_POS = 30         // self-cache seq dim = 80000/16000*6
+        const val SEQ = 32             // re-decode fixed max sequence (matches the compiled vmfb)
         const val START = 1
         const val END = 2
     }
