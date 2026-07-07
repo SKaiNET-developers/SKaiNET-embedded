@@ -63,6 +63,13 @@ internal class MoonshineDecoder(
         SystemFileSystem.source(Path("$modelDir/tokenizer.json")).buffered().use { it.readByteArray() }.decodeToString(),
     )
 
+    init {
+        // Program the NPU clock to the vendor's value before any torq dispatch, matching the vendor
+        // demo's startup step (defensive — guards a clock-off boot; the vendor encoder runs at the
+        // boot clock too). Skipped when the encoder runs on CPU (`local-task`).
+        if (encDevice == "torq") TorqRunModule.enableNpuClock()
+    }
+
     fun transcribe(wav: String): String? {
         SystemFileSystem.createDirectories(Path(work))
 
