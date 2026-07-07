@@ -44,6 +44,7 @@ declare -A RUNTIMES=(
   [app-alpha]="/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/torq/_runtime_libs/torq-run-module|/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/torq/_runtime_libs:/home/root/sl2610-voice-cc/.venv/lib/python3.12/site-packages/iree/_runtime_libs"
   [torq2-stable]="/home/root/torq2-stable/torq/_runtime_libs/torq-run-module|/home/root/torq2-stable/torq/_runtime_libs:/home/root/torq2-stable/iree/_runtime_libs"
   [torq2]="/home/root/torq2/torq_libs/torq-run-module|/home/root/torq2/torq_libs:/home/root/torq2/iree_libs"
+  [official-v2]="/home/root/torq-v2.0.0-official/lib/python3.12/site-packages/torq/_runtime_libs/torq-run-module|/home/root/torq-v2.0.0-official/lib/python3.12/site-packages/torq/_runtime_libs:/home/root/torq-v2.0.0-official/lib/python3.12/site-packages/iree/_runtime_libs"
 )
 declare -A COMPILERS=( [stable-docker]=compile_stable_docker [g165]=compile_g165 )
 

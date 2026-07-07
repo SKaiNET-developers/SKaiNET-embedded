@@ -40,3 +40,15 @@ CANARY_softmax_64=FAIL        # CSS softmax -> ZEROS/ERROR on EVERY runtime
 #   e2e) is the shippable path meanwhile.
 NPU_MULTIDISPATCH_TRUSTED=no
 NOTES=No available (compiler,runtime) pair executes a 3+-dispatch graph. g165e12a (exec v1, board-native compatible) SIGSEGVs compiling 3+matmul/softmax; stable v2.0.0 compiles them but the hardware returns zeros. See memory torq-multidispatch-runtime-zeros + torq-runtime-version-mismatch.
+
+# ---- "Current tool" verified (2026-07-07) ----
+# LATEST Torq framework release = v2.0.0 (github synaptics-torq/torq-compiler, 2026-06-20). There is
+# NO Torq v2.4.0 — "v2.4.0" is the Astra SDK version (the board OS), not the Torq toolchain.
+# The official v2.0.0 aarch64 runtime wheel was installed fresh on the board
+# (/home/root/torq-v2.0.0-official, runtime id `official-v2`) and gated against the pinned v2.0.0
+# compiler: identity+chain2 PASS, chain8+softmax FAIL (EXEC then no output) — IDENTICAL to the
+# deployed runtimes. So the multi-dispatch failure is a HARDWARE/firmware limit, not a toolchain
+# version gap; upgrading the Torq toolchain cannot fix it. Remaining levers: update the board Torq
+# kernel driver via the release's syna-kernel-artifacts.tgz (HIGH RISK / reflash), or the SyNAP path.
+LATEST_TORQ_RELEASE=v2.0.0
+CURRENT_TOOL_GATE=official v2.0.0 compiler x official v2.0.0 runtime -> multi-dispatch still FAIL (2026-07-07)
