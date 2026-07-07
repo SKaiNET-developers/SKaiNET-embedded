@@ -25,21 +25,42 @@ BOARD_RUNTIME_VERSION=torq_runtime-2.0.0
 EXEC_FORMAT=2
 
 # ---- Canary gate result (scripts/torq-verify.sh --matrix) ----
-# PARTIAL: single-dispatch graphs execute correctly; 3+-dispatch graphs DO NOT on ANY pair.
+# PARTIAL: single-dispatch graphs execute correctly; SOME multi-dispatch artifacts of ours zero out.
 CANARY_STATUS=PARTIAL
 CANARY_DATE=2026-07-07
 CANARY_identity_1x4=PASS      # exec-format loads + trivial matmul correct
 CANARY_chain2_64=PASS         # 2 chained matmuls correct (4096)
-CANARY_chain8_64=FAIL         # 3+ chained matmuls -> ZEROS/ERROR on EVERY runtime (hardware/toolchain limit)
-CANARY_softmax_64=FAIL        # CSS softmax -> ZEROS/ERROR on EVERY runtime
+CANARY_chain8_64=FAIL         # our 8-chained-matmul artifact -> ZEROS (compile/artifact defect, NOT hw ceiling; see below)
+CANARY_softmax_64=FAIL        # our softmax_64 canary zeros, BUT /home/root/moon/sm.vmfb (matmul->softmax->matmul) RUNS -> CSS works
+
+# ---- RESOLVED 2026-07-07: the discriminator is DISPATCH COUNT (compiler-capability gap) ----
+# The VENDOR's own encoder.vmfb (/home/root/sl2610-examples/models/Synaptics/moonshine-tiny-bf16-torq/
+# encoder.vmfb, 14.5MB, 6-layer) RUNS CORRECTLY on the NPU: in bf16[1,288,207] -> out bf16[1,207,288],
+# nonzero_frac=1.0, absmean 0.25. CRUCIALLY it compiles to **1 fused dispatch**. OUR self-compiled encoder
+# compiles to **40 dispatches** and returns ALL ZEROS. Dispatch counts, same board/runtime:
+#   vendor encoder  = 1 dispatch  -> RUNS        our enc-1L = 40 dispatches -> ZERO
+#   our chain2      = 1 dispatch  -> RUNS        our sm      = 2 dispatches -> RUN
+# So the SL2610 RUNTIME reliably executes only a FEW dispatches; the vendor gets a full encoder onto the
+# NPU by FUSING it to ONE dispatch. The NPU *hardware* is fine (runs the vendor's 1-dispatch encoder); the
+# earlier "not a hardware limit, our-compile f32-tail defect, fixable by matching the recipe" framing was
+# SUPERSEDED — the clean vendor DTYPE recipe (TorqMatmulBf16Pass: bf16xbf16->f32 matmuls, f32 reductions,
+# verified in the MLIR) STILL zeros, because our compiler cannot FUSE the encoder to one dispatch:
+#   tiling ON (ENC_TORQ=1)  -> compiles but 40 dispatches -> runtime zeros
+#   tiling OFF (full block) -> CSS codegen CRASH (css_linalg.generic, bf16 attention/softmax as one kernel)
+# The vendor's compiler build fuses the whole encoder to 1 dispatch with no tiling / no CSS crash — a
+# capability sl2610-iree:v2.0.0 (our docker compiler) does NOT have. NOT fixable by dtype/clock/flags.
+# NPU clock (devmem 0xf7e104b0 32 0x216) is a red herring for the zeros: the vendor encoder runs
+# bit-identically at the boot clock 0x298 and at 0x216 (it is a defensive setup step, not a fix).
 
 # ---- Consequences (enforced by tooling) ----
-# NPU_MULTIDISPATCH_TRUSTED=no  -> encoder/decoder-class (many-dispatch) vmfbs must NOT be trusted on
-#   --device=torq until CANARY_chain8_64 + CANARY_softmax_64 flip to PASS (needs the SDK-v2.4.0-matching
-#   Torq toolchain, or the SyNAP path). The CPU floor (--device=local-task, verified "One, two, three."
-#   e2e) is the shippable path meanwhile.
+# NPU_MULTIDISPATCH_TRUSTED=no  -> OUR self-compiled encoder/decoder vmfbs must NOT be trusted on
+#   --device=torq: our compiler emits many dispatches the runtime can't run. SHIPPED PATH: the demo
+#   (voicecc asr) runs the VENDOR's 1-dispatch encoder.vmfb on --device=torq (MoonshineDecoder default)
+#   + OUR self-compiled decoder on CPU -> verified e2e on the board: "One, two, three." / "Turn the light
+#   on" / "Set an alarm for 7 a.m.". Self-compiling the encoder needs the vendor's fusing compiler build.
 NPU_MULTIDISPATCH_TRUSTED=no
-NOTES=No available (compiler,runtime) pair executes a 3+-dispatch graph. g165e12a (exec v1, board-native compatible) SIGSEGVs compiling 3+matmul/softmax; stable v2.0.0 compiles them but the hardware returns zeros. See memory torq-multidispatch-runtime-zeros + torq-runtime-version-mismatch.
+NPU_CLOCK_ENABLE=devmem 0xf7e104b0 32 0x216   # vendor-parity NPU clock; DEFENSIVE (runs at boot clock too), MoonshineDecoder.init sets it
+NOTES=Runtime executes only a few dispatches. Vendor encoder = 1 FUSED dispatch -> runs; ours = 40 dispatches -> zeros. Our compiler cannot fuse (tiling->40 dispatches, no-tiling->CSS crash); vendor's build fuses to 1. Compiler-capability gap, NOT fixable by dtype recipe/clock/flags. Demo ships the vendor encoder.vmfb on NPU (verified e2e). See memory torq-vendor-encoder-runs-on-npu.
 
 # ---- "Current tool" verified (2026-07-07) ----
 # LATEST Torq framework release = v2.0.0 (github synaptics-torq/torq-compiler, 2026-06-20). There is
@@ -47,8 +68,21 @@ NOTES=No available (compiler,runtime) pair executes a 3+-dispatch graph. g165e12
 # The official v2.0.0 aarch64 runtime wheel was installed fresh on the board
 # (/home/root/torq-v2.0.0-official, runtime id `official-v2`) and gated against the pinned v2.0.0
 # compiler: identity+chain2 PASS, chain8+softmax FAIL (EXEC then no output) — IDENTICAL to the
-# deployed runtimes. So the multi-dispatch failure is a HARDWARE/firmware limit, not a toolchain
-# version gap; upgrading the Torq toolchain cannot fix it. Remaining levers: update the board Torq
-# kernel driver via the release's syna-kernel-artifacts.tgz (HIGH RISK / reflash), or the SyNAP path.
+# deployed runtimes. So it is NOT a toolchain-version gap (upgrading the Torq runtime can't fix it).
+# The real cause is the dispatch-fusion gap resolved above: the RUNTIME runs only a few dispatches and
+# our COMPILER can't fuse the encoder to one (the vendor's build can). Kernel-driver lever is a dead end
+# (see below); SyNAP untried; the shipped path is the vendor's 1-dispatch encoder.vmfb on the NPU.
 LATEST_TORQ_RELEASE=v2.0.0
 CURRENT_TOOL_GATE=official v2.0.0 compiler x official v2.0.0 runtime -> multi-dispatch still FAIL (2026-07-07)
+
+# ---- Kernel-driver lever investigated (2026-07-07): DEAD END, non-destructively ----
+# Board NPU driver = syna_npu.ko, a LOADABLE module (/lib/modules/6.12.62/updates/syna_npu.ko,
+# loaded, bound to platform dev f7600000.synpu; GPL, vermagic 6.12.62, no exported version string).
+# The v2.0.0 release's syna-kernel-artifacts.tgz is a KERNEL BUILD TREE (.config, Makefile, arch,
+# include, scripts) — 0 .ko files, 0 npu/synpu/torq driver source. It is headers to build
+# out-of-tree modules AGAINST, not a droppable driver. So there is NO newer syna_npu.ko to install
+# and NO source to build one. A driver update would require Synaptics to ship the syna_npu source or
+# a prebuilt .ko for kernel 6.12.62 (neither is in the public v2.0.0 release), OR a full SDK reflash.
+# Not attempted (board is SSH-only; brick = physical reflash). NPU multi-dispatch remains blocked;
+# shippable path stays the CPU floor (--device=local-task).
+KERNEL_DRIVER_LEVER=dead-end: no syna_npu.ko/source in v2.0.0 artifacts; needs vendor driver or reflash
