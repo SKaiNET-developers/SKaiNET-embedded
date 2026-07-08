@@ -8,9 +8,13 @@
 #                                     ->  gemma-gen.irpa                            (iree-convert-parameters)
 #                                     ->  gemma-gen.vmfb                            (iree-compile llvm-cpu)
 #
-# TARGET: host (default, x64 — validates the pipeline) or aarch64 (SL2610 board, +NEON).
-# IREE_IMAGE: iree-cpu-toolchain:3.11.0 (default). For the board runtime use the Torq-fork
-#   iree image (the board's iree-run-module rejects a bytecode feature stock IREE 3.x emits).
+# TARGET:
+#   host  (default) — x64 llvm-cpu via the stock IREE docker image; validates the pipeline.
+#   board           — aarch64+NEON llvm-cpu via the g165 Torq-fork iree-compile (TORQ_PKG). REQUIRED
+#                     for the SL2610: the board's iree-run-module rejects the "Ch" bytecode feature
+#                     stock IREE 3.x emits (verified). Produces a board-runnable gemma-gen.vmfb.
+# TORQ_PKG: g165 torq_compiler package dir (default /home/miso/projects/coral/build-mlir/torqpkg).
+# IREE_IMAGE: stock iree docker image for the host target (default iree-cpu-toolchain:3.11.0).
 #
 # Replaces the old test+Python chain (RealGemmaBakeIrpaTest + add_argmax_perpos.py + make_f16.py):
 #   - the argmax tail is now the DSL `argMax` op (in the emitted StableHLO), and
@@ -29,15 +33,28 @@ echo ">> [1/3] DSL -> gemma-gen.mlir + bf16 gemma.safetensors  (kgemma FunctionG
     ./gradlew -PuseLocalSkainet=true :llm-runtime:kgemma:exportFunctionGemma -q )
 
 echo ">> [2/3] gemma.safetensors -> gemma-gen.irpa  (iree-convert-parameters)"
-docker run --rm -v "$MLIR:/work" "$IREE_IMAGE" \
+docker run --rm --user "$(id -u):$(id -g)" -v "$MLIR:/work" "$IREE_IMAGE" \
     iree-convert-parameters --parameters=model=/work/gemma.safetensors --output=/work/gemma-gen.irpa
 
 echo ">> [3/3] iree-compile (llvm-cpu, $TARGET) -> gemma-gen.vmfb"
-EXTRA=""
-[ "$TARGET" = aarch64 ] && EXTRA="--iree-llvmcpu-target-triple=aarch64-unknown-linux-gnu --iree-llvmcpu-target-cpu-features=+neon"
-docker run --rm -v "$MLIR:/work" "$IREE_IMAGE" \
-    iree-compile /work/gemma-gen.mlir --iree-hal-target-device=local \
-    --iree-hal-local-target-device-backends=llvm-cpu $EXTRA -o /work/gemma-gen.vmfb
+if [ "$TARGET" = board ]; then
+    # g165 Torq-fork compiler (local, not docker): aarch64+NEON, board-compatible bytecode.
+    TORQ_PKG="${TORQ_PKG:-/home/miso/projects/coral/build-mlir/torqpkg}"
+    MLIRLIBS="$TORQ_PKG/iree/compiler/_mlir_libs"
+    [ -x "$MLIRLIBS/iree-compile" ] || { echo "error: g165 iree-compile not at $MLIRLIBS (set TORQ_PKG)" >&2; exit 1; }
+    SHIM="$(mktemp -d)"; printf '#!/usr/bin/env bash\nexec "%s/iree-lld" -flavor gnu "$@"\n' "$MLIRLIBS" > "$SHIM/ld"; chmod +x "$SHIM/ld"
+    PATH="$SHIM:$PATH" LD_LIBRARY_PATH="$MLIRLIBS" "$MLIRLIBS/iree-compile" \
+        --iree-input-type=stablehlo \
+        --iree-hal-target-device=local --iree-hal-local-target-device-backends=llvm-cpu \
+        --iree-llvmcpu-target-triple=aarch64-unknown-linux-gnu --iree-llvmcpu-target-cpu-features=+neon \
+        "$MLIR/gemma-gen.mlir" -o "$MLIR/gemma-gen.vmfb"
+    rm -rf "$SHIM"
+else
+    docker run --rm --user "$(id -u):$(id -g)" -v "$MLIR:/work" "$IREE_IMAGE" \
+        iree-compile /work/gemma-gen.mlir --iree-hal-target-device=local \
+        --iree-hal-local-target-device-backends=llvm-cpu -o /work/gemma-gen.vmfb
+fi
 
 echo ">> done: $MLIR/gemma-gen.{vmfb,irpa}"
-echo "   deploy both to the board (e.g. /home/root/ireetest/) — the demo's GemmaDecoder loads them."
+echo "   deploy both to /home/root/ireetest/ on the board — the demo's GemmaDecoder loads them."
+echo "   verified: 'turn the light on' -> [262146,236769,3255,718,498,1373,262152,106] = <tool_0>(state=\"on\")<end>"
