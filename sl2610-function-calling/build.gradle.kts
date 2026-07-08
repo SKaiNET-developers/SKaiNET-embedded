@@ -56,6 +56,8 @@ kotlin {
             implementation(libs.skainet.compile.opt)  // DtypeForwardPropagationPass
             implementation(libs.skainet.transformers.core) // transformer Modules (MHA/RoPE/FFN) for trace tooling
             implementation(libs.skainet.transformers.inference.moonshine) // moonshineEncoder() DSL, self-compiled here
+            // Torq NPU target passes (host export-time only; ENC_TORQ=1). Never enters the linuxArm64 binary.
+            implementation("sk.ainet.vendors:synaptics-torq:0.1.0")
         }
     }
 }
@@ -111,6 +113,20 @@ tasks.register<JavaExec>("moonshineDecoderMlir") {
     val main = kotlin.jvm().compilations.getByName("main")
     classpath(main.output.allOutputs, main.runtimeDependencyFiles)
     mainClass.set("voicecc.export.MoonshineDecoderExportKt")
+    val out = layout.buildDirectory.dir("mlir").get().asFile
+    doFirst { out.mkdirs() }
+    environment("MOONSHINE_DECODER_OUT_DIR", out.path)
+}
+
+// Self-compile the Moonshine audio FRONTEND (preprocessor) → StableHLO from the NN DSL.
+//   PP_CHECKPOINT=weights ./gradlew moonshinePreprocessorMlir
+tasks.register<JavaExec>("moonshinePreprocessorMlir") {
+    group = "bridge"
+    description = "Emit the Moonshine audio-frontend preprocessor StableHLO from the NN DSL (host tooling)."
+    dependsOn("jvmMainClasses")
+    val main = kotlin.jvm().compilations.getByName("main")
+    classpath(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("voicecc.export.MoonshinePreprocessorExportKt")
     val out = layout.buildDirectory.dir("mlir").get().asFile
     doFirst { out.mkdirs() }
     environment("MOONSHINE_DECODER_OUT_DIR", out.path)

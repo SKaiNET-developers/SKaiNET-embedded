@@ -116,7 +116,20 @@ private fun <T : DType> traceEncoder(
         Execution.tapeStack.pushTape(ct)
         try {
             val ectx = this as ExecutionContext
-            val x = if (boardLayout) ectx.ops.transpose(input) else input
+            // ENC_BATCHLESS=1 — feed the module a rank-2 [frames, dim] tensor so the whole graph
+            // is batchless (no leading unit dim), matching the Torq-friendly hand-written enc6.
+            // The DSL attention/LayerNorm/FFN operate on the last dims, so rank-2 traces cleanly and
+            // avoids the [1,…] batch dim that trips the Torq tiler (matmul→reshape[1,S,D]→add).
+            val batchless = System.getenv("ENC_BATCHLESS") == "1"
+            // Board layout [1, dim, frames] → [1, frames, dim]. ops.transpose on a rank-3 tensor
+            // reverses ALL dims ([2,1,0] → [frames, dim, 1]); do it in 2D (squeeze → transpose →
+            // unsqueeze) so it's an unambiguous last-two swap.
+            val x = when {
+                boardLayout && batchless -> ectx.ops.transpose(ectx.ops.squeeze(input, 0)) // [frames, dim] 2D
+                boardLayout -> ectx.ops.unsqueeze(ectx.ops.transpose(ectx.ops.squeeze(input, 0)), 0)
+                batchless -> ectx.ops.squeeze(input, 0) // [frames, dim] 2D
+                else -> input
+            }
             model.forward(x, ectx)
         } finally {
             Execution.tapeStack.popTape()
@@ -125,11 +138,41 @@ private fun <T : DType> traceEncoder(
 
     val rawGraph = (tape as DefaultExecutionTape).toComputeGraph(synthesizeExternalInputs = true)
 
-    // Core, HW-agnostic dtype unification (bf16-native traces record norms/reductions as f32).
-    // Target-specific passes (Torq tiling) live in the synaptics-torq vendor plugin and are NOT
-    // applied here — the emitted StableHLO stays portable.
+    // Core, HW-agnostic dtype unification first (bf16-native traces record norms/reductions as f32).
+    // The Torq tiling passes below read node OUTPUT dtypes, so this must run before them.
     val dtypeTarget = if (System.getenv("ENC_SKIP_DTYPE") == "1") null else floatDtype
-    val graph = sk.ainet.compile.opt.passes.DtypeForwardPropagationPass(targetFloatDtype = dtypeTarget).apply(rawGraph).graph
+    val dtyped = sk.ainet.compile.opt.passes.DtypeForwardPropagationPass(targetFloatDtype = dtypeTarget).apply(rawGraph).graph
+
+
+    // ENC_TORQ=1 → apply the Torq NPU tiling passes (attention head/query-seq tiling + FFN hidden
+    // tiling) from the synaptics-torq vendor plugin, so the batched matmuls fit the NPU's on-chip
+    // LRAM. Without this the encoder overflows LRAM at compile. Default (unset) stays portable
+    // (llvm-cpu). maxQuerySeqPerTile default 83 was proven at S=165; ENC_QTILE tunes it for S=207.
+    val graph = if (System.getenv("ENC_TORQ") == "1") {
+        val qTile = System.getenv("ENC_QTILE")?.toInt() ?: 83
+        val hTile = System.getenv("ENC_HTILE")?.toInt() ?: 4
+        sk.ainet.compile.opt.TargetOptimizers.clear() // install() is additive; reset for idempotency
+        sk.ainet.vendors.torq.TorqPlugin.install(maxHeadsPerTile = hTile, maxQuerySeqPerTile = qTile, ffnHiddenTile = 288, modelDim = cfg.dim)
+        println("[moonshineEncoderMlir] ENC_TORQ=1 — applying Torq tiling passes (hTile=$hTile, qTile=$qTile)")
+        val tiled = sk.ainet.compile.opt.dagPipelineFor(sk.ainet.vendors.torq.TorqPlugin.TARGET).optimize(dtyped).graph
+        // The tiling passes introduce new ops (e.g. FFN bias slices) whose dtypes aren't unified —
+        // TorqFfnTilingPass slices the bf16 fc1 bias to the f32 activation dtype without a convert.
+        // Re-run dtype forward-propagation to reconcile boundaries (inserts the needed converts).
+        val reconciled = sk.ainet.compile.opt.passes.DtypeForwardPropagationPass(targetFloatDtype = dtypeTarget).apply(tiled).graph
+        // The Torq NPU cannot compile f32 BATCHED attention (QK/AV matmuls + softmax) — "CSS program
+        // alloc" fail. Color the attention interior bf16 (bf16×bf16 matmuls, bf16 softmax) while
+        // residual/LayerNorm/projection stay f32, splicing converts on the boundaries (the vendor
+        // mixed-precision recipe). ENC_NO_BF16ATTN=1 to skip (diagnostic).
+        val colored = if (System.getenv("ENC_NO_BF16ATTN") == "1") reconciled
+        else sk.ainet.vendors.torq.TorqMatmulBf16Pass().apply(reconciled).graph
+        // Prune LAST: the tiling pass leaves the per-layer RoPE'd Q/K/V as dangling [1,H,S,D]
+        // leaves (reshape-to-batch of the SDPA fold), which `func @main` would return alongside
+        // the real [.., dim] memory. The Torq layout solver trips MatMulPattern:57 on those
+        // returned attention intermediates — drop them so only the encoder output remains.
+        sk.ainet.vendors.torq.TorqPruneOutputsPass(modelDim = cfg.dim).apply(colored).graph
+    } else {
+        dtyped
+    }
     return sk.ainet.compile.hlo.toStableHlo(graph, "moonshine_encoder").content
 }
 

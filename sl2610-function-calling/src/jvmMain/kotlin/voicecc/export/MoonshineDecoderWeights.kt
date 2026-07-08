@@ -28,6 +28,18 @@ private val DEC_LAYER = Regex("""^dec\.(\d+)\.(.+)$""")
 
 internal data class DecMap(val hfName: String?, val transpose: Boolean)
 
+/** Preprocessor (audio frontend) param → HF encoder conv/groupnorm tensor (conv weights [out,in,k], no transpose). */
+internal fun preprocessorHfNameFor(dslName: String): DecMap? = when (dslName) {
+    "conv1.weight" -> DecMap("encoder.conv1.weight", false)
+    "conv2.weight" -> DecMap("encoder.conv2.weight", false)
+    "conv2.bias" -> DecMap("encoder.conv2.bias", false)
+    "conv3.weight" -> DecMap("encoder.conv3.weight", false)
+    "conv3.bias" -> DecMap("encoder.conv3.bias", false)
+    "groupnorm.weight" -> DecMap("encoder.groupnorm.weight", false)
+    "groupnorm.bias" -> DecMap("encoder.groupnorm.bias", false)
+    else -> null
+}
+
 /** DSL decoder param name → (HF tensor name | null=zeros, transpose?). */
 internal fun decoderHfNameFor(dslName: String): DecMap? {
     when (dslName) {
@@ -76,10 +88,19 @@ internal fun <T : DType, V> bakeDecoderWeights(
     src: WeightSource,
     dtypeClass: KClass<T>,
     ctx: ExecutionContext,
+): Int = bakeMoonshineWeights(model, src, ::decoderHfNameFor, dtypeClass, ctx)
+
+/** Overwrite every param of [model] using [mapper] (decoder or preprocessor). Fail-fast on any gap. */
+internal fun <T : DType, V> bakeMoonshineWeights(
+    model: Module<T, V>,
+    src: WeightSource,
+    mapper: (String) -> DecMap?,
+    dtypeClass: KClass<T>,
+    ctx: ExecutionContext,
 ): Int {
     var baked = 0
     for (p in walkDecParams(model)) {
-        val map = decoderHfNameFor(p.name) ?: error("no HF mapping for DSL decoder param '${p.name}'")
+        val map = mapper(p.name) ?: error("no HF mapping for DSL param '${p.name}'")
         val shape = p.value.shape.dimensions
         val n = shape.fold(1) { a, b -> a * b }
         var data = if (map.hfName == null) FloatArray(n)

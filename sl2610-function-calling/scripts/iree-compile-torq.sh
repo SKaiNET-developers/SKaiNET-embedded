@@ -20,6 +20,19 @@ set -euo pipefail
 
 IN=${1:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
 OUT=${2:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
+
+# QUARANTINED — this is the g165e12a (dev, exec-format v1) compiler. It is NOT the pinned ASR
+# toolchain: it emits a different executable format than our stable-v2 pin and it SIGSEGVs on
+# 3+-matmul / softmax graphs (the encoder). It survives only for the separate FunctionGemma path
+# whose board runtime matches v1. Do NOT compile ASR vmfbs with it — use
+# scripts/iree-compile-torq-docker.sh (the pinned compiler in scripts/torq-toolchain.lock).
+if [ "${TORQ_FUNCTIONGEMMA_OK:-0}" != "1" ]; then
+  echo "error: iree-compile-torq.sh is quarantined (g165e12a — wrong exec-format for ASR). Use" >&2
+  echo "       scripts/iree-compile-torq-docker.sh (pinned in scripts/torq-toolchain.lock)." >&2
+  echo "       Override with TORQ_FUNCTIONGEMMA_OK=1 only for the FunctionGemma v1 path." >&2
+  exit 1
+fi
+
 TORQ_PKG=${TORQ_PKG:-/home/miso/projects/coral/build-mlir/torqpkg}
 PY=${PY:-/home/miso/.local/bin/python3.12}
 

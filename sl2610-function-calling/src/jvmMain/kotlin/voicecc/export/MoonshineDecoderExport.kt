@@ -45,16 +45,43 @@ fun main() {
     val past = System.getenv("DEC_PAST")?.toInt() ?: 1
     val useF32 = System.getenv("DEC_DTYPE") == "FP32"
     val outDir = System.getenv("MOONSHINE_DECODER_OUT_DIR") ?: "build/mlir"
+    // DEC_GRAPH selects which graph(s) to emit: redecode | prefill | with_past | all (default).
+    val graph = System.getenv("DEC_GRAPH") ?: "all"
+    // Re-decode graph: fixed max sequence; causal self-attn ignores padded future tokens, so a single
+    // static vmfb greedy-decodes the whole transcript (no KV-cache threading). The pragmatic e2e path.
+    val seq = System.getenv("DEC_REDECODE_SEQ")?.toInt() ?: 32
     val checkpoint = System.getenv("DECODER_CHECKPOINT")?.let { DirBinWeightSource(it) }
     if (checkpoint == null) println("[moonshineDecoderMlir] no DECODER_CHECKPOINT — weights stay as args (structure only)")
 
-    val prefill = if (useF32) tracePrefill(cfg, frames, FP32::class, checkpoint)
-    else tracePrefill(cfg, frames, BF16::class, checkpoint)
-    val withPast = if (useF32) traceWithPast(cfg, frames, past, FP32::class, checkpoint)
-    else traceWithPast(cfg, frames, past, BF16::class, checkpoint)
+    if (graph == "redecode" || graph == "all") {
+        val mlir = if (useF32) traceReDecode(cfg, seq, frames, FP32::class, checkpoint)
+        else traceReDecode(cfg, seq, frames, BF16::class, checkpoint)
+        write("$outDir/moonshine-decoder-redecode.mlir", mlir)
+    }
+    if (graph == "prefill" || graph == "all") {
+        val mlir = if (useF32) tracePrefill(cfg, frames, FP32::class, checkpoint) else tracePrefill(cfg, frames, BF16::class, checkpoint)
+        write("$outDir/moonshine-decoder.mlir", mlir)
+    }
+    if (graph == "with_past" || graph == "all") {
+        val mlir = if (useF32) traceWithPast(cfg, frames, past, FP32::class, checkpoint) else traceWithPast(cfg, frames, past, BF16::class, checkpoint)
+        write("$outDir/moonshine-decoder-with-past.mlir", mlir)
+    }
+}
 
-    write("$outDir/moonshine-decoder.mlir", prefill)
-    write("$outDir/moonshine-decoder-with-past.mlir", withPast)
+/** Re-decode graph: inputs_embeds `[1, seq, dim]` (padded token prefix) + memory → logits `[1, seq, vocab]`.
+ *  Greedy decode takes the last real position's logits each step; causal self-attn masks the padding. */
+private fun <T : DType> traceReDecode(cfg: MoonshineConfig, seq: Int, frames: Int, dtype: KClass<T>, w: WeightSource?): String {
+    val model = moonshineDecoder<T, Float>(cfg, dtype)
+    val ctx = DefaultGraphExecutionContext.tape(baseOps = VoidTensorOps())
+    if (w != null) bakeDecoderWeights(model, w, dtype, ctx as ExecutionContext)
+    val embeds = void(Shape(1, seq, cfg.dim), dtype)
+    val memory = void(Shape(1, frames, cfg.dim), dtype)
+    val tape = ctx.record {
+        val ct = (this as DefaultGraphExecutionContext).currentTape ?: error("no tape")
+        Execution.tapeStack.pushTape(ct)
+        try { model.forward(embeds, memory, this as ExecutionContext) } finally { Execution.tapeStack.popTape() }
+    }.first
+    return emit(tape, "moonshine_decoder_redecode", w != null, dtypeTag(dtype))
 }
 
 private fun write(path: String, mlir: String) {
