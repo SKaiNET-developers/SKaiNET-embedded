@@ -56,6 +56,8 @@ kotlin {
             implementation(libs.skainet.compile.opt)  // DtypeForwardPropagationPass
             implementation(libs.skainet.transformers.core) // transformer Modules (MHA/RoPE/FFN) for trace tooling
             implementation(libs.skainet.transformers.inference.moonshine) // moonshineEncoder() DSL, self-compiled here
+            // Torq NPU target passes (host export-time only; ENC_TORQ=1). Never enters the linuxArm64 binary.
+            implementation("sk.ainet.vendors:synaptics-torq:0.1.0")
         }
     }
 }

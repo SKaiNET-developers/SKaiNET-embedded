@@ -73,4 +73,23 @@ internal class TorqRunModule(
     private fun quote(s: String): String =
         if (s.all { it.isLetterOrDigit() || it in "-_=/.,:+@" }) s
         else "'" + s.replace("'", "'\\''") + "'"
+
+    companion object {
+        /**
+         * Program the SL2610 NPU clock to the vendor's value before running on `--device=torq`.
+         *
+         * Mirrors the vendor demo's startup step (`utils/npu.py enable_npu_clock()` →
+         * `devmem 0xf7e104b0 32 0x216`). This is a DEFENSIVE setup step, not a correctness fix: the
+         * vendor `encoder.vmfb` was verified 2026-07-07 to produce bit-identical output at both the
+         * boot value (0x298) and 0x216, so the clock isn't why our SELF-compiled encoder zeroed (that
+         * is the dispatch-fusion gap — vendor=1 dispatch, ours=40). We still set it to guarantee a
+         * known-good clock state matching the vendor (guards a clock-off boot). Idempotent and cheap.
+         */
+        fun enableNpuClock() {
+            val fp = popen("devmem 0xf7e104b0 32 0x216 2>&1", "r") ?: run {
+                println("[torq] NPU clock enable: popen failed"); return
+            }
+            pclose(fp)
+        }
+    }
 }
