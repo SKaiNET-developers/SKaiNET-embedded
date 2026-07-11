@@ -6,9 +6,11 @@ import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.toKString
 import platform.posix.fgets
+import platform.posix.getenv
 import platform.posix.pclose
 import platform.posix.popen
 import sk.ainet.transformers.gemma.iree.GemmaDecoder
+import sk.ainet.transformers.gemma.iree.GemmaKvDecoder
 import voicecc.actions.Intent
 import voicecc.actions.defaultRouter
 import voicecc.asr.MoonshineRunner
@@ -21,6 +23,7 @@ import voicecc.asr.MoonshineRunner
  * Tokenizer memory juggling + the decode loop live upstream in GemmaDecoder
  * (sk.ainet.transformers:skainet-transformers-runtime-gemma-iree).
  */
+@OptIn(ExperimentalForeignApi::class)
 public fun runPipeline(
     wav: String,
     ireeDir: String = "/home/root/ireetest",
@@ -31,13 +34,24 @@ public fun runPipeline(
     if (text.isNullOrBlank()) { println("[pipeline] ASR failed"); return }
     println("[1/4 asr]   \"$text\"")
 
-    // 2+3) Octopus-v2 prompt -> greedy decode -> parsed tool calls
-    val decoder = GemmaDecoder(
-        vmfb = "$ireeDir/gemma-gen.vmfb",
-        irpa = "$ireeDir/gemma-gen.irpa",
-        gguf = gguf,
-    )
-    val g = decoder.generate(text)
+    // 2+3) Octopus-v2 prompt -> greedy decode -> parsed tool calls.
+    // GEMMA_KV=1 opts into the KV-cache 2-graph decode (prefill + with_past vmfbs, perf-program Phase 2);
+    // default is the shipping fixed-seq re-decode. Both return a GemmaDecoder.Generation.
+    val useKv = getenv("GEMMA_KV")?.toKString()?.trim() == "1"
+    val g = if (useKv) {
+        GemmaKvDecoder(
+            prefillVmfb = "$ireeDir/gemma-prefill.vmfb",
+            withPastVmfb = "$ireeDir/gemma-with-past.vmfb",
+            irpa = "$ireeDir/gemma-gen.irpa",
+            gguf = gguf,
+        ).generate(text)
+    } else {
+        GemmaDecoder(
+            vmfb = "$ireeDir/gemma-gen.vmfb",
+            irpa = "$ireeDir/gemma-gen.irpa",
+            gguf = gguf,
+        ).generate(text)
+    }
     println("[2/4 llm]   ${g.toolCallText}")
     val intents = g.calls.map { Intent(it.tool, it.args) }
     println("[3/4 codec] $intents")
