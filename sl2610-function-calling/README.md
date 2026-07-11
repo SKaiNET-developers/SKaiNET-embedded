@@ -8,7 +8,7 @@ Goal: the same on-device voice/text → tool-call pipeline — mic → VAD →
 **Moonshine ASR (Torq NPU)** → **FunctionGemma LLM (CPU)** → action — as a single
 **cross-compiled aarch64 binary**, at ≥ the Python app's speed with Kotlin/KMP comfort.
 Heavy models go **DSL → StableHLO → IREE** (Torq for NPU, IREE `llvm-cpu` +NEON for CPU).
-Finish plan (clone → run → finetune): **[`../../FINISH-PLAN.md`](../../FINISH-PLAN.md)**.
+Finish plan (clone → run → finetune): **[`docs/FINISH-PLAN.md`](docs/FINISH-PLAN.md)**.
 
 ## Quick start (clone → run)
 
@@ -115,7 +115,7 @@ docs/                     FINETUNING.md (teach new commands) · TOOLCHAIN-PIN.md
                           BOARD-RUNBOOK.md (self-compiled-default + KV-cache board steps) ·
                           PERF-LOGBOOK.md · GEMMA-KV-BOARD-LOOP.md
 ```
-See **[`../../FINISH-PLAN.md`](../../FINISH-PLAN.md)** for what remains to reach a fully self-compiled,
+See **[`docs/FINISH-PLAN.md`](docs/FINISH-PLAN.md)** for what remains to reach a fully self-compiled,
 zero-Python, KV-fast, clone-to-run port.
 
 ## License
