@@ -18,8 +18,10 @@ set -euo pipefail
 
 ONNX=${1:?usage: moonshine_compile_preprocessor.sh <preprocessor.onnx> <out.vmfb>}
 OUT=${2:?usage: moonshine_compile_preprocessor.sh <preprocessor.onnx> <out.vmfb>}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+[ -f "$ROOT/demo.env" ] && . "$ROOT/demo.env"   # local config (TORQ_PKG, IMPORT_IMAGE); inline env still wins
 IMPORT_IMAGE=${IMPORT_IMAGE:-iree-cpu-toolchain:3.11.0}
-TORQ_PKG=${TORQ_PKG:-/home/miso/projects/coral/build-mlir/torqpkg}
+TORQ_PKG=${TORQ_PKG:-$ROOT/.toolchain/torqpkg}
 
 WORK=$(mktemp -d)
 cp "$ONNX" "$WORK/preprocessor.onnx"

@@ -20,8 +20,9 @@ set -euo pipefail
 
 IN=${1:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
 OUT=${2:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
-TORQ_PKG=${TORQ_PKG:-/home/miso/projects/coral/build-mlir/torqpkg}
-PY=${PY:-/home/miso/.local/bin/python3.12}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+[ -f "$ROOT/demo.env" ] && . "$ROOT/demo.env"   # local config (TORQ_PKG); inline env still wins
+TORQ_PKG=${TORQ_PKG:-$ROOT/.toolchain/torqpkg}
 
 MLIRLIBS="$TORQ_PKG/iree/compiler/_mlir_libs"
 LLD="$MLIRLIBS/iree-lld"

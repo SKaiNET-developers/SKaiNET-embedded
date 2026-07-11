@@ -8,7 +8,25 @@ Goal: the same on-device voice/text → tool-call pipeline — mic → VAD →
 **Moonshine ASR (Torq NPU)** → **FunctionGemma LLM (CPU)** → action — as a single
 **cross-compiled aarch64 binary**, at ≥ the Python app's speed with Kotlin/KMP comfort.
 Heavy models go **DSL → StableHLO → IREE** (Torq for NPU, IREE `llvm-cpu` +NEON for CPU).
-See the full plan in `../../.claude/plans/`.
+Finish plan (clone → run → finetune): **[`../../FINISH-PLAN.md`](../../FINISH-PLAN.md)**.
+
+## Quick start (clone → run)
+
+```bash
+./bootstrap.sh                 # creates demo.env, locates the Torq toolchain, checks models
+$EDITOR demo.env               # set BOARD=root@<ip> and GEMMA_GGUF=<your .gguf>
+./gradlew :jvmRun              # host smoke test — no board needed
+
+# board:
+GEMMA_GGUF=... scripts/compile-gemma.sh board   # self-compile FunctionGemma (Python-free)
+BOARD=root@<ip> ./gradlew deployBoard           # cross-compile aarch64, push, run on the SL2610
+```
+
+All machine/board-specific values live in **`demo.env`** (git-ignored; copy of `demo.env.example`).
+Every `scripts/*.sh` sources it, and inline env still wins (`BOARD=root@10.0.0.5 ./gradlew deployBoard`).
+No paths are hardcoded — the repo is meant to be cloned and run. **Teach it your own commands:**
+[`docs/FINETUNING.md`](docs/FINETUNING.md). The one gated dependency is the private Torq compiler wheel —
+`bootstrap.sh` tells you where to place it (see [`docs/TOOLCHAIN-PIN.md`](docs/TOOLCHAIN-PIN.md)).
 
 ## Based on the original Synaptics example
 
@@ -66,6 +84,7 @@ handlers are log-only (no Coral HAT assumed); register your own to drive real ha
 
 ## Dev loop
 ```bash
+./bootstrap.sh                             # one-time: demo.env + toolchain + model checks
 ./gradlew :jvmRun                          # run on host
 ./gradlew :jvmTest                         # common + jvm tests
 ./gradlew :linkReleaseExecutableLinuxArm64 # cross-compile aarch64 binary
@@ -73,7 +92,7 @@ BOARD=root@<board-ip> ./gradlew deployBoard   # build + push + run on the board
 # or directly:
 BOARD=root@<board-ip> sh scripts/deploy.sh --run
 ```
-The board IP changes per boot — set `BOARD` accordingly. Deploy streams the binary over ssh
+Set `BOARD` in `demo.env` (or inline — it changes per boot). Deploy streams the binary over ssh
 (`cat`; the BusyBox board has no rsync/sftp) and adds a `libcrypt.so.1` compat symlink
 (Kotlin/Native links glibc `libcrypt.so.1`; the board ships libxcrypt `libcrypt.so.2`),
 running with `LD_LIBRARY_PATH` so nothing in the system tree is touched.
@@ -84,13 +103,20 @@ surfaces `jvmRun` and `link…LinuxArm64`. Run configs live in `.run/`.
 
 ## Layout
 ```
+bootstrap.sh              one-time setup (demo.env, Torq toolchain, model checks)
+demo.env.example          the single config surface (BOARD, TORQ_PKG, GEMMA_GGUF, board dirs)
 src/commonMain/voicecc/   actions/ (ActionRouter, the 6 tools) + App.kt
 src/jvmMain/              host main + readSystemStatus actual + export/ (DSL→StableHLO:
                           HloBridge, MoonshineEncoderExport, MoonshineWeights)
 src/linuxArm64Main/       board main + Pipeline (ASR→LLM→codec→action) + asr/ (Moonshine on the NPU)
-scripts/                  deploy.sh · iree-compile-torq-docker.sh · gen-config-discover.sh ·
-                          convert_moonshine_weights.py · .docker/ (Torq compiler + gen_config images)
+scripts/                  bootstrap-sourced: deploy.sh · compile-gemma.sh · iree-compile-torq*.sh ·
+                          moonshine_compile_preprocessor.sh · gen-config-discover.sh · .docker/
+docs/                     FINETUNING.md (teach new commands) · TOOLCHAIN-PIN.md (toolchain currency) ·
+                          BOARD-RUNBOOK.md (self-compiled-default + KV-cache board steps) ·
+                          PERF-LOGBOOK.md · GEMMA-KV-BOARD-LOOP.md
 ```
+See **[`../../FINISH-PLAN.md`](../../FINISH-PLAN.md)** for what remains to reach a fully self-compiled,
+zero-Python, KV-fast, clone-to-run port.
 
 ## License
 MIT — see [LICENSE](LICENSE) (consistent with SKaiNET). This demo is a complete
