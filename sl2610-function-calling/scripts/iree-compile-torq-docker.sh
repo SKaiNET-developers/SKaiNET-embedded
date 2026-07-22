@@ -20,6 +20,24 @@ IN=${1:?usage: iree-compile-torq-docker.sh <in.mlir> <out.vmfb>}
 OUT=${2:?usage: iree-compile-torq-docker.sh <in.mlir> <out.vmfb>}
 IMAGE=${IREE_IMAGE:-sl2610-iree:v2.0.0}
 
+# --- toolchain pin: refuse to compile with a compiler that isn't the canary-verified one ---
+# The pinned compiler lives in scripts/torq-toolchain.lock (COMPILER_ID). A vmfb built with any
+# other compiler may silently mismatch the board runtime's executable format. Override only with
+# TORQ_ALLOW_UNPINNED=1 (prints a loud warning). Update the pin via docs/torq-toolchain-update.md.
+LOCK="$(cd "$(dirname "$0")" && pwd)/torq-toolchain.lock"
+if [ -f "$LOCK" ]; then
+  PINNED=$(grep -oaE '^COMPILER_ID=.*' "$LOCK" | head -n1 | cut -d= -f2- | sed 's/[[:space:]]*#.*//;s/[[:space:]]*$//')
+  if [ -n "$PINNED" ] && [ "$IMAGE" != "$PINNED" ]; then
+    if [ "${TORQ_ALLOW_UNPINNED:-0}" = "1" ]; then
+      echo "WARNING: IREE_IMAGE='$IMAGE' != pinned COMPILER_ID='$PINNED' (TORQ_ALLOW_UNPINNED=1) — vmfb may not run on the board." >&2
+    else
+      echo "error: IREE_IMAGE='$IMAGE' does not match the pinned COMPILER_ID='$PINNED' in $LOCK." >&2
+      echo "       Compile with the pinned compiler, or set TORQ_ALLOW_UNPINNED=1 to override (unsafe)." >&2
+      exit 1
+    fi
+  fi
+fi
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "error: image '$IMAGE' not found. Build it first:" >&2
   echo "  cp /path/to/torq_compiler-*.whl scripts/.docker/" >&2
@@ -32,6 +50,8 @@ OUT_DIR=$(cd "$(dirname "$OUT")" && pwd); OUT_BASE=$(basename "$OUT")
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
+  -e "TORQ_DISABLE_SLICES=${TORQ_DISABLE_SLICES:-0}" \
+  -e "COMPILER_ID=$IMAGE" \
   -v "$IN_DIR:/in:ro" \
   -v "$OUT_DIR:/out" \
   "$IMAGE" \
