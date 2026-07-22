@@ -20,6 +20,8 @@ set -euo pipefail
 
 IN=${1:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
 OUT=${2:?usage: iree-compile-torq.sh <in.mlir> <out.vmfb>}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+[ -f "$ROOT/demo.env" ] && . "$ROOT/demo.env"   # local config (TORQ_PKG); inline env still wins
 
 # QUARANTINED — this is the g165e12a (dev, exec-format v1) compiler. It is NOT the pinned ASR
 # toolchain: it emits a different executable format than our stable-v2 pin and it SIGSEGVs on
@@ -33,8 +35,7 @@ if [ "${TORQ_FUNCTIONGEMMA_OK:-0}" != "1" ]; then
   exit 1
 fi
 
-TORQ_PKG=${TORQ_PKG:-/home/miso/projects/coral/build-mlir/torqpkg}
-PY=${PY:-/home/miso/.local/bin/python3.12}
+TORQ_PKG=${TORQ_PKG:-$ROOT/.toolchain/torqpkg}
 
 MLIRLIBS="$TORQ_PKG/iree/compiler/_mlir_libs"
 LLD="$MLIRLIBS/iree-lld"

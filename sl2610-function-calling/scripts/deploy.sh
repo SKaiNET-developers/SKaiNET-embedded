@@ -5,6 +5,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+[ -f "$ROOT/demo.env" ] && . "$ROOT/demo.env"   # local config (BOARD, DEST, …); inline env still wins
 BOARD=${BOARD:-root@192.168.3.26}
 DEST=${DEST:-/home/root/voicecc-kt}
 SSH_OPTS=${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10}
