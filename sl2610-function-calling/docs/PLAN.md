@@ -106,11 +106,12 @@ document the pin. Board OS SDK already current (`scarthgap_6.12_v2.4.0`).
 - Board-verify the Gemma KV 2-graph loop (`GEMMA_KV=1` → `gemma-prefill.vmfb` + `gemma-with-past.vmfb`,
   driver `GemmaKvDecoder`); confirm the flagged unknowns (arg order, K-vs-V output order, entry-fn names).
 - Board-verify the Moonshine KV decode (`MOONSHINE_KV=1`, `MoonshineKvDecoder`).
-- ⚠️ **Provenance (verified 2026-07-23):** the Gemma KV export (`exportPrefill`/`exportWithPast` + int8 in
-  `kgemma/FunctionGemmaExport.kt`) and its tests are **uncommitted** in SKaiNET-transformers (dirty
-  `release/0.35.0` tree); the committed/released 0.35.0 ships only the re-decode bf16 export. Commit + release
-  that upstream before the `GEMMA_KV=1` board loop is reproducible from a clean clone.
-- Record before/after in `PERF-LOGBOOK.md`. Full steps + the K-vs-V trap in `GEMMA-KV-BOARD-LOOP.md`.
+- ✅ **Rescued + CPU-verified (2026-07-23):** the Gemma KV export (`exportPrefill`/`exportWithPast` + int8) +
+  `GemmaKvDecoder` were uncommitted WIP; now committed + forward-ported to SKaiNET-transformers `develop`
+  (0.36.1) as **PR #245**, with all three CPU tests passing (token-for-token, dynamic-relax structure, int8).
+  Remaining: release it + bump the demo; board-verify the loop. Full status + open issues (board, release,
+  conformance, DSL-philosophy debt) in **`GEMMA-KV-INT8.md`**.
+- Record before/after in `PERF-LOGBOOK.md`. Full board steps + the K-vs-V trap in `GEMMA-KV-BOARD-LOOP.md`.
 
 ### P5 — Finetuning recipe (custom commands) ✅ (docs) → *done-when #2, the downstream goal*
 - ✅ `FINETUNING.md`: define new tools → dataset in the Octopus-v2 prompt format → LoRA train (offline
