@@ -1,6 +1,6 @@
 # Board runbook — the steps that need the SL2610 (and the final packaging)
 
-Everything in `FINISH-PLAN.md` that can't run off-board, plus the last packaging move. Each step is
+Everything in `PLAN.md` (Part A) that can't run off-board, plus the last packaging move. Each step is
 independently runnable and has an explicit "done when." Ordered by the plan's sequencing.
 
 Prereqs: `./bootstrap.sh` done, `demo.env` set (BOARD, TORQ_PKG, GEMMA_GGUF), board reachable
