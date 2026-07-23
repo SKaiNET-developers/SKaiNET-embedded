@@ -19,7 +19,9 @@ git clone <the port>  →  ./bootstrap.sh  →  BOARD=root@<ip> ./gradlew deploy
 
 Everything on the board runs on our own self-compiled vmfbs (no vendor Moonshine binaries), zero runtime
 Python, at KV-cache-usable latency — and a documented recipe lets you retrain FunctionGemma to understand
-new commands and re-bake into the demo.
+new commands and re-bake into the demo. Beyond that: **Moonshine ASR on the Torq NPU** (not just CPU),
+**low-latency streaming** recognition (Moonshine v2), and **Moonshine + FunctionGemma reusable as standalone
+components** in other apps and on other IREE targets (CPU/GPU/NPU).
 
 ## Status (updated 2026-07-23)
 
@@ -38,7 +40,8 @@ frozen as a reproducible baseline (opt-in behind `GEMMA_KV=1` / `MOONSHINE_KV=1`
   still Python. **P4** — board-verify the Gemma + Moonshine KV loops (~6 s/token → KV win); **note the Gemma
   KV export is uncommitted upstream** (see P4). **P2 canary** re-validation of a newer Torq release. And the
   **standalone-repo extraction** (publish the `kgemma` exporter as a CLI + make `CompactCodec.TOKEN_TO_NAME`
-  injectable). Executable steps: `BOARD-RUNBOOK.md`.
+  injectable). **P6** — Moonshine **v2 streaming encoder + on-NPU** (the strategic bet; done-when #5 + #6).
+  **P7** — reuse & multi-target hardening (done-when #7). Executable steps: `BOARD-RUNBOOK.md`.
 
 ## Where we are (maturity)
 
@@ -49,12 +52,20 @@ Engine + models are at a matched **0.35.0**; IREE conformance last green on 0.33
 **productization, board performance verification, and extensibility** — not research. The granular status of
 every model/op/toolchain item lives in Part B.
 
-## Definition of done (all four — locked with the user 2026-07-11)
+## Definition of done
 
+Core four (locked 2026-07-11):
 1. **Reproducible clone-to-run** — fresh clone + bootstrap + `deployBoard`, no manual path/IP surgery.
 2. **Finetuning recipe** — scripted path to retrain FunctionGemma on custom commands and re-bake.
 3. **Fully self-compiled, zero Python** — our encoder+decoder as the board default; VAD in Kotlin.
 4. **Usable performance** — Gemma (and Moonshine) KV-cache decode board-verified.
+
+Strengthened goals (added 2026-07-23):
+5. **Moonshine ASR on the Torq NPU** — the encoder runs on the **NPU** with correct (non-zero) output, not
+   just self-compiled on CPU. (Today: blocked on v1; see P6 for the v2-first path.)
+6. **Streaming ASR** — low-latency chunked recognition via the Moonshine **v2** sliding-window causal encoder.
+7. **Reusable standalone components** — Moonshine + FunctionGemma consumable in other apps; the same DSL model
+   compiles + runs on ≥2 IREE targets (host llvm-cpu proven; GPU roadmap).
 
 ## Phases
 
@@ -108,10 +119,46 @@ document the pin. Board OS SDK already current (`scarthgap_6.12_v2.4.0`).
 - ✅ `examples/custom-command/`: a minimal worked example (one new tool + a tiny dataset template).
 - ◻ Board-verify the loop end-to-end on real hardware (part of P3/P4 board time).
 
+### P6 — Moonshine v2: streaming + on-NPU (the leapfrog) → *done-when #5 + #6* — **◻ new, the strategic bet**
+Rationale: v1's encoder is bidirectional full-attention — a hard **streaming** blocker *and* the O(T²) shape
+that the Torq NPU can't fuse (~40 dispatches → zeros; un-tiled → CSS crash). Moonshine **v2**
+([paper](https://huggingface.co/papers/2602.12241)) replaces it with a **position-free sliding-window causal**
+encoder (bounded lookahead (16,4)/(16,0) + an adapter layer). Its bounded **O(Tw)** local attention is both
+streamable and far more NPU-tileable — so v2 targets done-when #5 (NPU) and #6 (streaming) with **one** model
+rework, and is less dependent on a Synaptics fusion fix. This **subsumes** the v1-on-NPU items (3N-c / 3D-e /
+3DEC-d); the vendor `encoder.vmfb` (NPU) and our CPU encoder stay as fallbacks meanwhile.
+- **Author the v2 encoder** in the reusable DSL module (`SKaiNET-transformers/llm-inference/moonshine/`):
+  drop RoPE/abs-pos (position-free), **sliding-window self-attention** (window 16; right-context 4 or 0 by
+  layer via a block-causal mask on `transformer-core` MHA), and the **adapter layer** to the position-aware
+  decoder. bf16 stays a target choice (see P7).
+- **Streaming runtime**: 50 Hz / 20 ms frames, roll the encoder over a bounded lookahead buffer, expose
+  provisional (live) vs finalized states; **reuse the existing causal KV-cache decoder** (`MoonshineKvDecoder`
+  / DSL `forwardWithPast` — already streaming-ready). Chunk-shaped graphs replace the fixed `INPUT_LEN=80000`
+  padded clip; window/append encoder memory across chunks for the decoder cross-attention.
+- **Tile v2's local attention onto the Torq NPU**: re-tune `TorqAttentionTilingPass` / `TorqFfnTilingPass` for
+  the fixed window so the bounded matmuls fit LRAM and fuse where v1 couldn't. Verify non-zero on-device output.
+
+### P7 — Reuse & multi-target hardening → *done-when #7* — **◻ mostly cheap, parallelizable**
+Packaging is already clean: `sk.ainet.transformers:skainet-transformers-inference-moonshine` /
+`…-inference-gemma` (reusable DSL models, no board/Torq code) + `…-runtime-gemma-iree` (GemmaDecoder/…);
+Torq passes are quarantined in `sk.ainet.vendors:synaptics-torq`; the `TargetOptimizers` core stays
+HW-agnostic; host llvm-cpu already works.
+- **Document the standalone-reuse story** — per-module reuse README: what each artifact is, how to consume it
+  in another app (Maven coordinates), and the target-agnostic compile seam.
+- **Decouple the bf16-native Torq default** in `MoonshineEncoder.kt` — make dtype a parameter (default
+  portable); bf16 becomes a Torq-target choice, not baked into the reusable model.
+- **Prove host portability** — the SAME DSL model → `scripts/iree-compile-cpu.sh` → runs on host llvm-cpu
+  (AVX). This is the ≥2-target proof for done-when #7.
+- **GPU (CUDA/Vulkan) = documented roadmap**: add a `TargetOptimizer` + a compile script mirroring
+  `iree-compile-cpu.sh` (the registry already supports registering a new target). Not built now.
+
 ## Sequencing
 `P0 → P1 → P3 → P4 → P5` (P5 docs done; P5 board-verify rides P3/P4); `P2 canary` slots in when the board is
-free. Biggest residual risk: the KV-cache K-vs-V / entry-fn unknowns (P4) — the only items needing live board
-debugging. Everything else is packaging/wiring/docs over already-proven components.
+free. **P7** (reuse/multi-target) is cheap and parallel — do it alongside anything. **P6** (Moonshine v2
+streaming + NPU) is the large strategic phase and the path to done-when #5 and #6; it's a model rework, so it
+runs as its own track once the demo is stable. The v1-on-NPU items are deprioritized under it. Biggest residual
+risks: the KV-cache K-vs-V / entry-fn unknowns (P4, live board), and whether v2's local attention actually
+fuses on the Torq NPU (P6) — everything else is packaging/wiring/docs over already-proven components.
 
 ## Verification (end-to-end, per phase)
 - **P1:** clone into a fresh temp dir → `./bootstrap.sh` → `./gradlew :jvmRun` with no edits to any path.
@@ -120,6 +167,10 @@ debugging. Everything else is packaging/wiring/docs over already-proven componen
 - **P4:** `VOICECC_PROFILE=1 voicecc gen "turn the light on"` shows KV latency well under the re-decode
   baseline; token stream matches the oracle.
 - **P5:** run `examples/custom-command/` end-to-end → new spoken command routes to the new tool.
+- **P6:** streaming ASR meets a latency budget (chunk lookahead ≤ ~320 ms) with WER parity vs full-utterance;
+  the v2 encoder produces **non-zero output on the Torq NPU** (clears the v1 fusion/zeros blocker).
+- **P7:** the reusable `skainet-transformers-inference-moonshine` / `-inference-gemma` module compiles + runs
+  standalone on **host llvm-cpu** (AVX) from a minimal consumer — same DSL, no board.
 
 ---
 
@@ -207,6 +258,11 @@ SKaiNET stack. The real work is Moonshine **authored in the NN DSL, compiled by 
       **zeros on-device** (the runtime executes only a few dispatches / no fusion), while the vendor
       `encoder.vmfb` is one fused dispatch. This is the standing blocker for a self-compiled NPU encoder —
       escalation + analysis in `docs/synaptics-support/README.md` and `TOOLCHAIN-PIN.md`.
+
+> **Strategy note (2026-07-23):** the v1-on-NPU items (3N-c, 3D-e, 3DEC-d, 3SC-d) are **deprioritized in favor
+> of the Moonshine v2 leapfrog (Part A → P6)** — v2's bounded sliding-window attention should tile/fuse onto the
+> NPU where v1's O(T²) full attention can't, and delivers streaming at the same time. The vendor `encoder.vmfb`
+> (NPU) + our CPU encoder remain the fallbacks until P6 lands.
 
 ### 3D — Moonshine in the NN DSL (our-stack build; parallel to 3N) · [U-tx]+[D]
 - [x] **3D-a** Author Moonshine-tiny in the NN DSL (`llm-inference:moonshine`): conv preprocessor,
