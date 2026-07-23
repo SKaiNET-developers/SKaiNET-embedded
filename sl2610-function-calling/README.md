@@ -8,7 +8,7 @@ Goal: the same on-device voice/text → tool-call pipeline — mic → VAD →
 **Moonshine ASR (Torq NPU)** → **FunctionGemma LLM (CPU)** → action — as a single
 **cross-compiled aarch64 binary**, at ≥ the Python app's speed with Kotlin/KMP comfort.
 Heavy models go **DSL → StableHLO → IREE** (Torq for NPU, IREE `llvm-cpu` +NEON for CPU).
-Finish plan (clone → run → finetune): **[`docs/FINISH-PLAN.md`](docs/FINISH-PLAN.md)**.
+Finish plan (clone → run → finetune): **[`docs/PLAN.md`](docs/PLAN.md)**.
 
 ## Quick start (clone → run)
 
@@ -75,7 +75,7 @@ handlers are log-only (no Coral HAT assumed); register your own to drive real ha
   while the self-compiled path lands.
 - **Next** — the Moonshine **decoder** in the DSL (still external: vendor vmfb / HF reference), then
   Kotlin VAD/mic (the last runtime Python), host-native `linuxX64`, and the parity/latency gate.
-  Traceable plan: `../../PLAN.md`.
+  Traceable plan: [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Targets
 - `jvm()` — fast host dev + A/B reference harness.
@@ -115,7 +115,7 @@ docs/                     FINETUNING.md (teach new commands) · TOOLCHAIN-PIN.md
                           BOARD-RUNBOOK.md (self-compiled-default + KV-cache board steps) ·
                           PERF-LOGBOOK.md · GEMMA-KV-BOARD-LOOP.md
 ```
-See **[`docs/FINISH-PLAN.md`](docs/FINISH-PLAN.md)** for what remains to reach a fully self-compiled,
+See **[`docs/PLAN.md`](docs/PLAN.md)** for what remains to reach a fully self-compiled,
 zero-Python, KV-fast, clone-to-run port.
 
 ## License
