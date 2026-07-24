@@ -58,9 +58,27 @@ loop over incoming 20ms frames:
 3. **Board verification** — the provisional/finalized latency budget (≤ ~320 ms) + WER parity vs full-utterance
    on recorded wavs; then wire into `runListen` (and it kills the VAD-segmented full-utterance path, P3/4.1).
 
+## Confirmed against the real v2 model (2026-07-24)
+Obtained the official model via `uv`: `uv add moonshine-voice && uv run moonshine-voice download --stt
+--language en` (repo `github.com/moonshine-ai/moonshine`; variants `tiny/small/base/medium-streaming`, ORT
+format, safetensors on HF). The default English STT is **`medium-streaming`**. Its files **confirm this exact
+pipeline**: `frontend.ort → encoder.ort → adapter.ort → cross_kv.ort + decoder_kv.ort / decoder_kv_with_attention.ort`.
+
+`streaming_config.json` (medium): `encoder_dim=768, decoder_dim=640, depth=14, nheads=10, head_dim=64,
+vocab_size=32768, bos_id=1, eos_id=2, frame_len=80, total_lookahead=16, d_model_frontend=768, c1=1536, c2=768`.
+The **frontend carries streaming state** across chunks — `frontend_state_shapes`: `sample_buffer [1,79]`,
+`conv1_buffer [1,768,4]`, `conv2_buffer [1,1536,4]`, `frame_count [1]`. That state is exactly the rolling-buffer
+bookkeeping the runtime above needs (feed it in/out per chunk rather than re-padding a fixed clip).
+Per-layer window/lookahead follow the paper ((16,4) for the first + last two encoder layers, (16,0) intermediate).
+
+The demo should target **`tiny-streaming`** (SL2610 fits tiny, not medium's 768-dim/14-layer). Its config has the
+same fields with smaller numbers — pull it the same way and bake per that `streaming_config.json`.
+
 ## Status
-- ✅ v2 encoder (#244) + v2 adapter (#251) authored + traced to StableHLO.
-- ◻ This runtime (scaffold pending the v2 vmfbs + board — steps above).
+- ✅ v2 encoder (#244) + v2 adapter (#251) authored + traced to StableHLO — **architecture now confirmed against
+  the real model** (adapter + cross_kv + decoder_kv all present as separate graphs, matching what we authored).
+- ◻ Correct the authored `MoonshineV2Config` to the real fields + fix the lookahead-layer pattern (first+last two).
+- ◻ This runtime (scaffold pending the baked v2 vmfbs + board — steps above).
 - ◻ NPU tiling of the bounded window.
 
 Tracked as plan item **P6**. Board bring-up joins `BOARD-RUNBOOK.md` once the v2 vmfbs exist.
