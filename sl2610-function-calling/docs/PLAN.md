@@ -29,8 +29,9 @@ components** in other apps and on other IREE targets (CPU/GPU/NPU).
 - **Demo (`SKaiNET-embedded`):** #9 clone-to-run packaging + `TOOLCHAIN-PIN.md` + `FINETUNING.md`, #10 this
   consolidated plan, #11 the `GEMMA-KV-INT8.md` tracker (P1/P2 doc/P5 all landed).
 - **`SKaiNET-transformers` → develop:** #245 the **FunctionGemma KV-cache + int8** rescue (P4 export side,
-  CPU-verified), #243 the Moonshine/Gemma **reuse READMEs** (P7 partial). *Open:* #244 the **Moonshine v2
-  streaming encoder** (P6 start).
+  CPU-verified), #243 the Moonshine/Gemma **reuse READMEs** (P7 partial), #244 the **Moonshine v2 streaming
+  encoder** — position-free + bounded-lookahead window, the transformer-core `rightContext` enabler (P6 first
+  increment).
 - **`skainet-iree-conformance`:** #25 the `functiongemma-270m` row, #26 pin → core 0.36.0 / transformers
   0.36.1, #28 Kotlin 2.4.0 (native builds restored).
 - **`SKaiNET` core → develop:** #878 — **argMax→StableHLO lowering fixed** (reduced-i32 spec; closed #876),
@@ -41,8 +42,8 @@ components** in other apps and on other IREE targets (CPU/GPU/NPU).
   export is now **committed + on transformers develop** (no longer stranded).
 - **Remaining:** **P3** — encoder default still the vendor NPU vmfb (~40-dispatch fusion gap), VAD still
   Python (needs board). **P4** — board-verify the Gemma + Moonshine KV loops (~6 s/token → KV win) + release
-  transformers so a clean clone gets it. **P6** — the v2 streaming encoder (#244 open; then adapter + streaming
-  runtime + NPU tiling). **P7** — GPU target (host CPU proven). **P2 canary** + standalone-repo extraction.
+  transformers so a clean clone gets it. **P6** — v2 streaming encoder **landed (#244)**; next: the adapter
+  layer + streaming runtime + NPU tiling of the bounded window. **P7** — GPU target (host CPU proven). **P2 canary** + standalone-repo extraction.
   **Conformance follow-up:** once a core release carries #878 and the conformance pin bumps to it, the
   `functiongemma-270m` Compile stage flips green (leaving the KV-2-graph as its last gap — conformance #24).
   Executable board steps: `BOARD-RUNBOOK.md`.
