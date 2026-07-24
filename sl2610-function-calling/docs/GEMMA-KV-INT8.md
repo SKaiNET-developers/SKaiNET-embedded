@@ -4,6 +4,16 @@ The KV-cache 2-graph decode + int8 quant is the fix for FunctionGemma's ~6000 ms
 (`PERF-LOGBOOK.md` baseline) — plan item **P4**. This tracks what's **landed** and every **board / release /
 philosophy** step still required.
 
+## GitHub issues (filed 2026-07-24)
+| Open item | Issue |
+|---|---|
+| Board-verify the KV loop | SKaiNET-embedded #12 |
+| int8 on-board | SKaiNET-embedded #13 |
+| MLIR-text-rewrite → graph transforms (philosophy debt) | SKaiNET-transformers #248 |
+| Release KV/int8 + demo bump | SKaiNET-transformers #249 |
+| Test-heap default OOM | SKaiNET-transformers #250 |
+| Conformance rows | skainet-iree-conformance #24 |
+
 ## Landed (2026-07-23)
 - **SKaiNET-transformers PR #245** (`feat/functiongemma-kv-int8` → `develop` 0.36.1): rescued the work from
   uncommitted WIP, forward-ported onto develop, **CPU-verified**. All three tests pass with the Q5_K_M GGUF:
