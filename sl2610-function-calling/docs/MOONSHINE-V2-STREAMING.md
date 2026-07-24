@@ -71,13 +71,44 @@ The **frontend carries streaming state** across chunks — `frontend_state_shape
 bookkeeping the runtime above needs (feed it in/out per chunk rather than re-padding a fixed clip).
 Per-layer window/lookahead follow the paper ((16,4) for the first + last two encoder layers, (16,0) intermediate).
 
-The demo should target **`tiny-streaming`** (SL2610 fits tiny, not medium's 768-dim/14-layer). Its config has the
-same fields with smaller numbers — pull it the same way and bake per that `streaming_config.json`.
+The demo should target **`tiny-streaming`** (SL2610 fits tiny, not medium's 768-dim/14-layer).
+
+## tiny-streaming — obtained, inspected, baked (2026-07-24)
+Pulled the tiny variant directly (the `.ort` is an optimized flatbuffer unreadable by `onnx`; the **float
+`.onnx`** graphs at `download.moonshine.ai/model/tiny-streaming-en/float/` are the readable bake source):
+- **Real tiny config** (`quantized/streaming_config.json`): `encoder_dim=320, decoder_dim=320, depth=6,
+  nheads=8, head_dim=40 (8×40=320), vocab=32768, frame_len=80, total_lookahead=16, c1=640, c2=320`. Clean and
+  consistent (unlike medium's 768≠640) → confirmed as the demo target. `MoonshineV2Config` defaults corrected
+  to these (transformers PR #252).
+- **Encoder graph** (inspected): weights are name-obfuscated (`val_14`, `add_25`), only FFN biases keep
+  semantic names — but the topology is fully regular: per block `[q,k,v,o]` `[320,320]` + FFN `[320,1280]`/
+  `[1280,320]` (ffn=4·dim), each norm = shared-unit `LayerNorm` then a learned `[dim]` scale `Mul`. Attention
+  is **bias-free and position-free** (no RoPE; only a scalar 1/√d) and the norms are **scale-only (no bias)**.
+- **Adapter graph** (inspected): a plain `Gather + Add` — `memory = encoded + pos_embed[pos_offset+t]`, sole
+  learned tensor `pos_embed.weight [4096,320]`, **no LayerNorm** → corrected `MoonshineV2Adapter` (PR #251).
+
+**Bake** (`scripts/convert_moonshine_v2_weights.py`, uv + onnx): recovers each encoder tensor's role by graph
+topology (name-obfuscation-proof) and writes per-tensor little-endian f32 `.bin` + `manifest.json`, same layout
+as the v1 `convert_moonshine_weights.py`. Linear weights are ONNX `[in,out]` → `transpose:true` in the manifest
+(DSL `linearProject` wants `[out,in]`); scale-only norms get zero bias at load (as v1). Verified: **62 tensors**
+(6 blocks × {attn_norm, q, k, v, o, ffn_norm, ff_up+b, ff_down+b} + enc_out_norm + adapter pos_embed), all
+byte-sizes exact.
+```
+uv add moonshine-voice requests onnx
+# fetch float graphs: download.moonshine.ai/model/tiny-streaming-en/float/{encoder,adapter}.onnx
+python scripts/convert_moonshine_v2_weights.py --onnx-dir <float-onnx> --out <baked> --dim 320 --layers 6
+```
+Remaining: a Kotlin `MoonshineV2EncoderWeights` mapper (DSL param → baked `.bin`, parallel to
+`MoonshineDecoderWeights`) + a bake test, then compile the encoder+adapter to chunk-shaped CPU vmfbs.
 
 ## Status
-- ✅ v2 encoder (#244) + v2 adapter (#251) authored + traced to StableHLO — **architecture now confirmed against
+- ✅ v2 encoder (#244) + v2 adapter (#251) authored + traced to StableHLO — **architecture confirmed against
   the real model** (adapter + cross_kv + decoder_kv all present as separate graphs, matching what we authored).
-- ◻ Correct the authored `MoonshineV2Config` to the real fields + fix the lookahead-layer pattern (first+last two).
+- ✅ `MoonshineV2Config` corrected to real tiny dims (dim=320/6L/8H/hd=40/ffn=1280, PR #252) + lookahead pattern
+  (first+last two, earlier fix); adapter corrected to pos-embed-add-only, no LayerNorm (PR #251).
+- ✅ tiny-streaming weights **baked** to f32 `.bin` + manifest (`scripts/convert_moonshine_v2_weights.py`, 62
+  tensors, byte-exact).
+- ◻ Kotlin `MoonshineV2EncoderWeights` mapper + bake test → compile encoder+adapter to chunk-shaped CPU vmfbs.
 - ◻ This runtime (scaffold pending the baked v2 vmfbs + board — steps above).
 - ◻ NPU tiling of the bounded window.
 
