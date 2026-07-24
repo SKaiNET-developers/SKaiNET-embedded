@@ -98,8 +98,12 @@ uv add moonshine-voice requests onnx
 # fetch float graphs: download.moonshine.ai/model/tiny-streaming-en/float/{encoder,adapter}.onnx
 python scripts/convert_moonshine_v2_weights.py --onnx-dir <float-onnx> --out <baked> --dim 320 --layers 6
 ```
-Remaining: a Kotlin `MoonshineV2EncoderWeights` mapper (DSL param → baked `.bin`, parallel to
-`MoonshineDecoderWeights`) + a bake test, then compile the encoder+adapter to chunk-shaped CPU vmfbs.
+The Kotlin **`MoonshineV2EncoderWeights`** mapper + **`MoonshineV2EncoderBakeTest`** (transformers PR #254)
+close the loop: they map every DSL param of `moonshineV2Encoder` / `MoonshineV2Adapter` to its baked tensor
+(reusing the v1 `bakeMoonshineWeights` infra; linear weights transpose from ONNX `[in,out]`, scale-only norms
+get zero bias). **Verified**: 74 encoder params + adapter `pos_embed [4096,320]` bake, and with `embedConstants`
+the weights fold to `stablehlo.constant` leaving only the `features` input. Remaining: compile the
+constant-folded encoder+adapter to chunk-shaped CPU vmfbs, then wire the streaming runtime.
 
 ## Status
 - ✅ v2 encoder (#244) + v2 adapter (#251) authored + traced to StableHLO — **architecture confirmed against
@@ -108,7 +112,9 @@ Remaining: a Kotlin `MoonshineV2EncoderWeights` mapper (DSL param → baked `.bi
   (first+last two, earlier fix); adapter corrected to pos-embed-add-only, no LayerNorm (PR #251).
 - ✅ tiny-streaming weights **baked** to f32 `.bin` + manifest (`scripts/convert_moonshine_v2_weights.py`, 62
   tensors, byte-exact).
-- ◻ Kotlin `MoonshineV2EncoderWeights` mapper + bake test → compile encoder+adapter to chunk-shaped CPU vmfbs.
+- ✅ Kotlin `MoonshineV2EncoderWeights` mapper + `MoonshineV2EncoderBakeTest` (transformers #254) — verified:
+  74 encoder params + adapter pos_embed bake; weights fold to constants (only `features` remains).
+- ◻ Compile the constant-folded encoder+adapter to chunk-shaped CPU vmfbs.
 - ◻ This runtime (scaffold pending the baked v2 vmfbs + board — steps above).
 - ◻ NPU tiling of the bounded window.
 
