@@ -118,7 +118,11 @@ constant-folded encoder+adapter to chunk-shaped CPU vmfbs, then wire the streami
   → `iree-compile` (llvm-cpu, `iree-cpu-toolchain:3.11.0`). Both **compile AND run** on `iree-run-module`
   (`local-task`): encoder `1x64x320→1x64x320` (29.6 MB, full 6-layer stack), adapter `(positions 1x64xi32,
   memory 1x64x320)→1x64x320` (5.25 MB) — real finite output. This is the shippable CPU floor for v2.
-- ◻ This runtime (scaffold pending the board — wire the chunk vmfbs into `runListen`; steps above).
+- ✅ Streaming runtime **scaffold** (`MoonshineV2StreamingRunner`, linuxArm64) — rolling feature buffer +
+  bounded-window finalization (slide by `HOP = CHUNK − WINDOW − LOOKAHEAD`), driving the encoder + adapter
+  vmfbs incrementally via `TorqRunModule`/`Bin`; produces the finalized adapted memory. Compiles clean.
+- ◻ Wire the two SEAMS: the **frontend** vmfb (audio→features + streaming conv state) and the **v2 KV decoder**
+  vmfb (`decoder_kv`, reuse the `MoonshineKvDecoder` loop over v2 dims) → emit provisional/final text; board.
 - ◻ NPU tiling of the bounded window.
 
 Tracked as plan item **P6**. Board bring-up joins `BOARD-RUNBOOK.md` once the v2 vmfbs exist.

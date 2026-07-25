@@ -76,6 +76,25 @@ internal object Bin {
         ((v ushr 24) and 0xFF).toByte(),
     )
 
+    /** An int array as raw LE i32 bytes (e.g. the v2 adapter's absolute frame positions). */
+    fun i32Bytes(a: IntArray): ByteArray {
+        val out = ByteArray(a.size * 4)
+        for (i in a.indices) {
+            val v = a[i]
+            out[i * 4] = (v and 0xFF).toByte()
+            out[i * 4 + 1] = ((v ushr 8) and 0xFF).toByte()
+            out[i * 4 + 2] = ((v ushr 16) and 0xFF).toByte()
+            out[i * 4 + 3] = ((v ushr 24) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    /** Read a raw LE f32 buffer into a FloatArray. */
+    fun readF32(path: String): FloatArray {
+        val b = readBytes(path)
+        return FloatArray(b.size / 4) { getF32(b, it) }
+    }
+
     /** Argmax over a raw bf16 logits buffer of [count] elements. */
     fun argmaxBf16(b: ByteArray, count: Int): Int {
         var best = -1
