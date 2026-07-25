@@ -114,8 +114,11 @@ constant-folded encoder+adapter to chunk-shaped CPU vmfbs, then wire the streami
   tensors, byte-exact).
 - ✅ Kotlin `MoonshineV2EncoderWeights` mapper + `MoonshineV2EncoderBakeTest` (transformers #254) — verified:
   74 encoder params + adapter pos_embed bake; weights fold to constants (only `features` remains).
-- ◻ Compile the constant-folded encoder+adapter to chunk-shaped CPU vmfbs.
-- ◻ This runtime (scaffold pending the baked v2 vmfbs + board — steps above).
+- ✅ **Encoder + adapter compiled to CPU vmfbs** (`scripts/compile-moonshine-v2.sh cpu`): DSL → baked StableHLO
+  → `iree-compile` (llvm-cpu, `iree-cpu-toolchain:3.11.0`). Both **compile AND run** on `iree-run-module`
+  (`local-task`): encoder `1x64x320→1x64x320` (29.6 MB, full 6-layer stack), adapter `(positions 1x64xi32,
+  memory 1x64x320)→1x64x320` (5.25 MB) — real finite output. This is the shippable CPU floor for v2.
+- ◻ This runtime (scaffold pending the board — wire the chunk vmfbs into `runListen`; steps above).
 - ◻ NPU tiling of the bounded window.
 
 Tracked as plan item **P6**. Board bring-up joins `BOARD-RUNBOOK.md` once the v2 vmfbs exist.
