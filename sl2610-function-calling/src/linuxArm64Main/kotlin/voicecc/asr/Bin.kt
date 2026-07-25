@@ -95,6 +95,28 @@ internal object Bin {
         return FloatArray(b.size / 4) { getF32(b, it) }
     }
 
+    /** An int array as raw LE i64 bytes (e.g. the v2 decoder's token ids, which the ONNX graph takes as si64). */
+    fun i64Bytes(a: IntArray): ByteArray {
+        val out = ByteArray(a.size * 8)
+        for (i in a.indices) {
+            val v = a[i].toLong()
+            for (b in 0 until 8) out[i * 8 + b] = ((v ushr (8 * b)) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    /** Argmax over row [row] of a `[1, rows, cols]` LE f32 logits buffer. */
+    fun argmaxF32Row(b: ByteArray, row: Int, cols: Int): Int {
+        var best = 0
+        var bestV = Float.NEGATIVE_INFINITY
+        val base = row * cols
+        for (c in 0 until cols) {
+            val v = getF32(b, base + c)
+            if (v > bestV) { bestV = v; best = c }
+        }
+        return best
+    }
+
     /** Argmax over a raw bf16 logits buffer of [count] elements. */
     fun argmaxBf16(b: ByteArray, count: Int): Int {
         var best = -1
