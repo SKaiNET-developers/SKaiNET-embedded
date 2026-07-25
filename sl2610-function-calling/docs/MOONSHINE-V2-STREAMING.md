@@ -121,8 +121,20 @@ constant-folded encoder+adapter to chunk-shaped CPU vmfbs, then wire the streami
 - ✅ Streaming runtime **scaffold** (`MoonshineV2StreamingRunner`, linuxArm64) — rolling feature buffer +
   bounded-window finalization (slide by `HOP = CHUNK − WINDOW − LOOKAHEAD`), driving the encoder + adapter
   vmfbs incrementally via `TorqRunModule`/`Bin`; produces the finalized adapted memory. Compiles clean.
-- ◻ Wire the two SEAMS: the **frontend** vmfb (audio→features + streaming conv state) and the **v2 KV decoder**
-  vmfb (`decoder_kv`, reuse the `MoonshineKvDecoder` loop over v2 dims) → emit provisional/final text; board.
+- ✅ **frontend + cross_kv + decoder_kv compiled to CPU vmfbs** (`scripts/compile-moonshine-v2-onnx.sh`) — the
+  seam graphs. All 5 v2 graphs now compile: encoder+adapter self-compiled from the DSL; frontend (8.3 MB),
+  cross_kv (4.9 MB), decoder_kv (128 MB) imported from the **vendor float ONNX** via `iree-import-onnx` →
+  `iree-compile` (llvm-cpu, entry `@main_graph`). decoder_kv needs its opset-17 `onnx.LayerNormalization`
+  decomposed first (`onnx_decompose_layernorm.py`; IREE 3.11.0 can't legalize the fused op). frontend + cross_kv
+  **compile AND run** on `iree-run-module` (features+state; per-layer cross K/V `6x1x8x64x40`); decoder_kv
+  compiles (running it needs the full cache contract, wired by the runtime). The whole pipeline is now
+  IREE-only — no onnxruntime, no vendor runtime.
+- ◻ **Provenance follow-up (north star):** frontend/cross_kv/decoder_kv are vendor-ONNX-sourced, not yet
+  DSL-authored (unlike encoder/adapter). Author them in the SKaiNET DSL (the v1 decoder is already DSL-authored
+  — follow that) to reach "no vendor binaries, all self-compiled".
+- ◻ Wire the seams into `MoonshineV2StreamingRunner`: frontend (audio→features + streaming conv state) and
+  cross_kv+decoder_kv decode loop (reuse the `MoonshineKvDecoder` prefill/with_past shape over v2 dims) → emit
+  provisional/final text; board bring-up.
 - ◻ NPU tiling of the bounded window.
 
 Tracked as plan item **P6**. Board bring-up joins `BOARD-RUNBOOK.md` once the v2 vmfbs exist.
