@@ -23,25 +23,30 @@ new commands and re-bake into the demo. Beyond that: **Moonshine ASR on the Torq
 **low-latency streaming** recognition (Moonshine v2), and **Moonshine + FunctionGemma reusable as standalone
 components** in other apps and on other IREE targets (CPU/GPU/NPU).
 
-## Status (updated 2026-07-23)
+## Status (updated 2026-07-24)
 
-**Landed & merged — PR #9 → `feature/google-io-demo` (2026-07-22):** clone-to-run packaging (single
-`demo.env` config surface; every `scripts/*.sh` sources it, inline env wins, no hardcoded paths/IP;
-`bootstrap.sh`; README Quick-start), the toolchain-currency decision (`TOOLCHAIN-PIN.md`), the finetuning
-recipe (`FINETUNING.md` + `examples/custom-command/`), this plan, and the in-flight KV-cache decode drafts
-frozen as a reproducible baseline (opt-in behind `GEMMA_KV=1` / `MOONSHINE_KV=1`; default paths unchanged).
+**Merged this cycle, across all four repos:**
+- **Demo (`SKaiNET-embedded`):** #9 clone-to-run packaging + `TOOLCHAIN-PIN.md` + `FINETUNING.md`, #10 this
+  consolidated plan, #11 the `GEMMA-KV-INT8.md` tracker (P1/P2 doc/P5 all landed).
+- **`SKaiNET-transformers` → develop:** #245 the **FunctionGemma KV-cache + int8** rescue (P4 export side,
+  CPU-verified), #243 the Moonshine/Gemma **reuse READMEs** (P7 partial), #244 the **Moonshine v2 streaming
+  encoder** — position-free + bounded-lookahead window, the transformer-core `rightContext` enabler (P6 first
+  increment).
+- **`skainet-iree-conformance`:** #25 the `functiongemma-270m` row, #26 pin → core 0.36.0 / transformers
+  0.36.1, #28 Kotlin 2.4.0 (native builds restored).
+- **`SKaiNET` core → develop:** #878 — **argMax→StableHLO lowering fixed** (reduced-i32 spec; closed #876),
+  the bug the `functiongemma-270m` conformance row drove out.
 
-- **Done:** P0 (docs reconciled, KV WIP frozen), **P1 packaging**, **P2 doc**, **P5 docs**. Also verified
-  2026-07-23: the Moonshine **decoder + preprocessor + embeddings already default to OUR self-compiled
-  artifacts** on the board (`MoonshineDecoder.kt`); the DSL encoder + decoder are authored and CPU-proven
-  (`MoonshineDecoderE2ECpuTest`).
-- **Remaining (needs board + the private Torq wheel):** **P3** — only the **encoder** default is still a
-  vendor binary (NPU); making OUR encoder the default is blocked by the ~40-dispatch fusion gap, and VAD is
-  still Python. **P4** — board-verify the Gemma + Moonshine KV loops (~6 s/token → KV win); **note the Gemma
-  KV export is uncommitted upstream** (see P4). **P2 canary** re-validation of a newer Torq release. And the
-  **standalone-repo extraction** (publish the `kgemma` exporter as a CLI + make `CompactCodec.TOKEN_TO_NAME`
-  injectable). **P6** — Moonshine **v2 streaming encoder + on-NPU** (the strategic bet; done-when #5 + #6).
-  **P7** — reuse & multi-target hardening (done-when #7). Executable steps: `BOARD-RUNBOOK.md`.
+- **Done:** P0, **P1 packaging**, **P2 doc**, **P5 docs**; the Moonshine decoder+preprocessor+embeddings
+  already default to OUR self-compiled artifacts (CPU-proven `MoonshineDecoderE2ECpuTest`). The Gemma KV/int8
+  export is now **committed + on transformers develop** (no longer stranded).
+- **Remaining:** **P3** — encoder default still the vendor NPU vmfb (~40-dispatch fusion gap), VAD still
+  Python (needs board). **P4** — board-verify the Gemma + Moonshine KV loops (~6 s/token → KV win) + release
+  transformers so a clean clone gets it. **P6** — v2 streaming encoder **landed (#244)**; next: the adapter
+  layer + streaming runtime + NPU tiling of the bounded window. **P7** — GPU target (host CPU proven). **P2 canary** + standalone-repo extraction.
+  **Conformance follow-up:** once a core release carries #878 and the conformance pin bumps to it, the
+  `functiongemma-270m` Compile stage flips green (leaving the KV-2-graph as its last gap — conformance #24).
+  Executable board steps: `BOARD-RUNBOOK.md`.
 
 ## Where we are (maturity)
 
