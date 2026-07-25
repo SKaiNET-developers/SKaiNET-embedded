@@ -125,7 +125,7 @@ document the pin. Board OS SDK already current (`scarthgap_6.12_v2.4.0`).
 - ✅ `examples/custom-command/`: a minimal worked example (one new tool + a tiny dataset template).
 - ◻ Board-verify the loop end-to-end on real hardware (part of P3/P4 board time).
 
-### P6 — Moonshine v2: streaming + on-NPU (the leapfrog) → *done-when #5 + #6* — **◻ new, the strategic bet**
+### P6 — Moonshine v2: streaming + on-NPU (the leapfrog) → *done-when #5 + #6* — **encoder + adapter authored; streaming + NPU remain**
 Rationale: v1's encoder is bidirectional full-attention — a hard **streaming** blocker *and* the O(T²) shape
 that the Torq NPU can't fuse (~40 dispatches → zeros; un-tiled → CSS crash). Moonshine **v2**
 ([paper](https://huggingface.co/papers/2602.12241)) replaces it with a **position-free sliding-window causal**
@@ -133,14 +133,14 @@ encoder (bounded lookahead (16,4)/(16,0) + an adapter layer). Its bounded **O(Tw
 streamable and far more NPU-tileable — so v2 targets done-when #5 (NPU) and #6 (streaming) with **one** model
 rework, and is less dependent on a Synaptics fusion fix. This **subsumes** the v1-on-NPU items (3N-c / 3D-e /
 3DEC-d); the vendor `encoder.vmfb` (NPU) and our CPU encoder stay as fallbacks meanwhile.
-- **Author the v2 encoder** in the reusable DSL module (`SKaiNET-transformers/llm-inference/moonshine/`):
-  drop RoPE/abs-pos (position-free), **sliding-window self-attention** (window 16; right-context 4 or 0 by
-  layer via a block-causal mask on `transformer-core` MHA), and the **adapter layer** to the position-aware
-  decoder. bf16 stays a target choice (see P7).
-- **Streaming runtime**: 50 Hz / 20 ms frames, roll the encoder over a bounded lookahead buffer, expose
-  provisional (live) vs finalized states; **reuse the existing causal KV-cache decoder** (`MoonshineKvDecoder`
-  / DSL `forwardWithPast` — already streaming-ready). Chunk-shaped graphs replace the fixed `INPUT_LEN=80000`
-  padded clip; window/append encoder memory across chunks for the decoder cross-attention.
+- ✅ **v2 encoder authored** (transformers #244): position-free, sliding-window self-attention (window 16,
+  right-context 4/0 by layer) via the new `transformer-core` `rightContext` mask knob; traces to StableHLO.
+- ✅ **v2 adapter authored** (transformers #251): learned positional embedding + norm bridging the position-free
+  encoder to the position-aware decoder; traces to StableHLO. No decoder change (drop-in for the encoder memory).
+- ◻ **Streaming runtime**: 50 Hz / 20 ms frames, roll the encoder over a bounded lookahead buffer, provisional
+  vs finalized states; **reuse the existing causal KV-cache decoder** (`MoonshineKvDecoder`). Chunk-shaped graphs
+  replace the fixed `INPUT_LEN=80000` clip. **Full design + implementation plan: `MOONSHINE-V2-STREAMING.md`.**
+  Needs the v2 checkpoint (weights) + board.
 - **Tile v2's local attention onto the Torq NPU**: re-tune `TorqAttentionTilingPass` / `TorqFfnTilingPass` for
   the fixed window so the bounded matmuls fit LRAM and fuse where v1 couldn't. Verify non-zero on-device output.
 
