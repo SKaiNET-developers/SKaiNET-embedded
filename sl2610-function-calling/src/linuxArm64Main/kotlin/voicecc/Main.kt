@@ -89,6 +89,30 @@ fun main(args: Array<String>) {
         return
     }
 
+    // `voicecc asr-v2 <wav>` — self-compiled Moonshine **v2** STREAMING ASR (DSL encoder/adapter/decoder,
+    // KV-cache decode). Drives the streaming Flow API: chunk the clip (1 s) into a Flow<FloatArray> and print
+    // each provisional transcript then the final one — the mic/VAD seam without a mic.
+    if (args.isNotEmpty() && args[0] == "asr-v2") {
+        val wav = args.getOrElse(1) { "/home/root/moon/test.wav" }
+        val samples = voicecc.asr.Wav.loadResampled(wav)
+        val chunkN = 16000
+        kotlinx.coroutines.runBlocking {
+            val chunks = kotlinx.coroutines.flow.flow {
+                var i = 0
+                while (i < samples.size) {
+                    emit(samples.copyOfRange(i, minOf(i + chunkN, samples.size))); i += chunkN
+                }
+            }
+            voicecc.asr.MoonshineV2StreamingRunner().transcribe(chunks).collect { ev ->
+                when (ev) {
+                    is voicecc.asr.AsrEvent.Partial -> println("[asr-v2] … ${ev.text}")
+                    is voicecc.asr.AsrEvent.Final -> println("[asr-v2] ✓ ${ev.text}")
+                }
+            }
+        }
+        return
+    }
+
     // `voicecc asr <wav>` — Moonshine ASR on the Torq NPU via the Kotlin binding.
     if (args.isNotEmpty() && args[0] == "asr") {
         val wav = args.getOrElse(1) { "/home/root/voicecc-kt/test.wav" }

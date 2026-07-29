@@ -16,6 +16,12 @@ internal object Wav {
         return FloatArray(targetLen) { if (it < at16k.size) at16k[it] else 0f }
     }
 
+    /** Load [path] as 16 kHz mono float samples in [-1,1] — full length, NOT padded (for streaming). */
+    fun loadResampled(path: String): FloatArray {
+        val (samples, rate) = load(path)
+        return if (rate == TARGET_RATE) samples else resampleLinear(samples, rate, TARGET_RATE)
+    }
+
     /** Returns mono float samples in [-1,1] and the source sample rate. */
     private fun load(path: String): Pair<FloatArray, Int> {
         val b = Bin.readBytes(path)

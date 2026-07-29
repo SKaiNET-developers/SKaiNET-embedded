@@ -3,6 +3,8 @@ package voicecc.asr
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.toKString
 import kotlinx.io.buffered
@@ -48,8 +50,16 @@ import sk.ainet.apps.llm.tokenizer.GGUFTokenizer
  *      with_past, logits last — matching the compiled MLIR signatures) and the RoPE position convention.
  *   3. prefill/with_past over the GROWING finalized memory — decoded once per [transcribe]; windowing is a follow-up.
  */
+/** A streaming-transcription update. [Partial] is provisional (later audio may refine it); [Final] is the
+ *  transcript once the audio stream completes. */
+public sealed interface AsrEvent {
+    public val text: String
+    public data class Partial(override val text: String) : AsrEvent
+    public data class Final(override val text: String) : AsrEvent
+}
+
 @OptIn(ExperimentalForeignApi::class)
-internal class MoonshineV2StreamingRunner(
+public class MoonshineV2StreamingRunner(
     // DSL-authored, self-compiled (entry @main):
     private val encoderVmfb: String =
         getenv("MOONSHINE_V2_ENCODER_VMFB")?.toKString() ?: "/home/root/moon/moonshine-v2-encoder-cpu.vmfb",
@@ -208,15 +218,26 @@ internal class MoonshineV2StreamingRunner(
 
     // ---- SEAM 2: decode (DSL prefill once + with_past autoregressive loop, per-layer K/V) ----
 
+    // Fixed-max cross-memory frames the prefill/with_past vmfbs are compiled at. The finalized encoder
+    // memory is zero-padded to this length and a cross-attention mask blanks the padding, so ONE vmfb pair
+    // serves any encoder length ≤ MAX_MEM. MUST match MOONSHINE_V2_MAX_MEM used at compile time.
+    private val maxMem: Int = getenv("MOONSHINE_V2_MAX_MEM")?.toKString()?.toIntOrNull() ?: 96
+
     /** Decode the finalized memory to token ids. Runs the DSL decoder prefill once (seeds self + cross K/V),
      *  then greedy with_past steps over the growing per-layer self-cache. */
     fun decodeTokens(maxNew: Int = MAX_NEW): List<Int> {
         val f = finalizedFrames
         if (f == 0) return emptyList()
+        require(f <= maxMem) { "finalized memory $f frames exceeds compiled maxMem $maxMem (recompile with larger MOONSHINE_V2_MAX_MEM)" }
+        // Fixed-max-pad the encoder memory to [maxMem, DIM] (real f frames + zeros) and build the additive
+        // cross mask [1,1,1,maxMem] (0 for real frames, -inf for padding), so the fixed-shape prefill/with_past
+        // vmfbs accept any encoder length ≤ maxMem — the padding is masked out of cross-attention.
         val memFile = "$work/dec_mem.bin"
-        Bin.writeBytes(memFile, Bin.f32Bytes(FloatArray(f * DIM) { finalizedMemory[it] }))
+        Bin.writeBytes(memFile, Bin.f32Bytes(FloatArray(maxMem * DIM) { if (it < f * DIM) finalizedMemory[it] else 0f }))
+        val maskFile = "$work/dec_mask.bin"
+        Bin.writeBytes(maskFile, Bin.f32Bytes(FloatArray(maxMem) { if (it < f) 0f else -1e30f }))
 
-        // PREFILL over the START token: embeds[1,1,DIM] + memory → per-layer [selfK,selfV,crossK,crossV] + logits.
+        // PREFILL over the START token: embeds[1,1,DIM] + memory[1,maxMem,DIM] + crossMask → per-layer KV + logits.
         Bin.writeBytes("$work/pre_emb.bin", embedRow(BOS))
         val preFiles = (0 until N_LAYERS).flatMap { l ->
             listOf("$work/pre_sk_$l.bin", "$work/pre_sv_$l.bin", "$work/pre_ck_$l.bin", "$work/pre_cv_$l.bin")
@@ -224,7 +245,8 @@ internal class MoonshineV2StreamingRunner(
         if (!torq.run(prefillVmfb, ENTRY_FN, device,
                 listOf(
                     TorqRunModule.Spec("1x1x$DIM", "f32", "$work/pre_emb.bin"),
-                    TorqRunModule.Spec("1x${f}x$DIM", "f32", memFile),
+                    TorqRunModule.Spec("1x${maxMem}x$DIM", "f32", memFile),
+                    TorqRunModule.Spec("1x1x1x$maxMem", "f32", maskFile),
                 ), preFiles)) {
             println("[v2] decoder prefill failed"); return emptyList()
         }
@@ -247,9 +269,11 @@ internal class MoonshineV2StreamingRunner(
             for (l in 0 until N_LAYERS) {
                 Bin.writeBytes("$work/wp_sk_$l.bin", selfK[l]); Bin.writeBytes("$work/wp_sv_$l.bin", selfV[l])
             }
-            // inputs: token, cos, sin, then per-layer [selfK, selfV, crossK, crossV].
+            // inputs: token, cos, sin, then per-layer [selfK, selfV, crossK, crossV] — with the shared crossMask
+            // inserted right after layer 0's cross block (arg7), matching the masked with_past graph's
+            // trace-derived arg order. Cross cache is fixed at maxMem (padded); the mask blanks the padding.
             val selfShape = "1x${N_HEADS}x${pastLen}x$HEAD_DIM"
-            val crossShape = "1x${N_HEADS}x${f}x$HEAD_DIM"
+            val crossShape = "1x${N_HEADS}x${maxMem}x$HEAD_DIM"
             val inputs = arrayListOf(
                 TorqRunModule.Spec("1x1x$DIM", "f32", "$work/wp_emb.bin"),
                 TorqRunModule.Spec("1x$HEAD_DIM", "f32", "$work/wp_cos.bin"),
@@ -260,6 +284,7 @@ internal class MoonshineV2StreamingRunner(
                 inputs += TorqRunModule.Spec(selfShape, "f32", "$work/wp_sv_$l.bin")
                 inputs += TorqRunModule.Spec(crossShape, "f32", crossK[l])
                 inputs += TorqRunModule.Spec(crossShape, "f32", crossV[l])
+                if (l == 0) inputs += TorqRunModule.Spec("1x1x1x$maxMem", "f32", maskFile)
             }
             // outputs: per-layer [newSelfK, newSelfV], then logits.
             val outs = (0 until N_LAYERS).flatMap { listOf("$work/wp_nsk_$it.bin", "$work/wp_nsv_$it.bin") } +
@@ -291,8 +316,51 @@ internal class MoonshineV2StreamingRunner(
         return c to s
     }
 
+    /**
+     * Streaming transcription as a cold [Flow]: collect a flow of 16 kHz mono audio chunks and receive
+     * transcript updates — an [AsrEvent.Partial] after each chunk that finalizes new encoder memory
+     * (provisional, may still change as more context arrives), then a single [AsrEvent.Final] once the audio
+     * flow completes. Each `collect` drives one independent decode session (feed → finalize → decode over the
+     * growing finalized memory). This is the idiomatic seam for a mic/VAD source that produces audio over time.
+     *
+     * NOTE: `transcribe()` below re-decodes the FULL finalized memory, so the decoder prefill vmfb must accept
+     * that frame count. Until the cross-attention memory is length-generalized (fixed-max-pad + mask, tracked
+     * separately), this runs correctly only while `finalizedMemory` stays within the prefill's compiled frames.
+     */
+    public fun transcribe(audio: Flow<FloatArray>): Flow<AsrEvent> = flow {
+        var lastFrames = 0
+        audio.collect { chunk ->
+            feedAudio(chunk)
+            val frames = finalizedMemory.size / DIM
+            if (frames > lastFrames) {
+                lastFrames = frames
+                emit(AsrEvent.Partial(transcribe()))
+            }
+        }
+        finish()
+        emit(AsrEvent.Final(transcribe()))
+    }
+
+    /**
+     * Whole-clip convenience over the [Flow] API: load [wavPath] (resampled to 16 kHz), stream it in
+     * [chunkSamples]-sample chunks, and suspend until the final transcript.
+     */
+    public suspend fun transcribe(wavPath: String, chunkSamples: Int = 16000): String {
+        val samples = Wav.loadResampled(wavPath)
+        val chunks: Flow<FloatArray> = flow {
+            var i = 0
+            while (i < samples.size) {
+                emit(samples.copyOfRange(i, minOf(i + chunkSamples, samples.size)))
+                i += chunkSamples
+            }
+        }
+        var last = ""
+        transcribe(audio = chunks).collect { last = it.text }
+        return last
+    }
+
     /** End-to-end: decode the finalized memory and detokenize (raw ids if no tokenizer is configured). */
-    fun transcribe(maxNew: Int = MAX_NEW): String {
+    public fun transcribe(maxNew: Int = MAX_NEW): String {
         val ids = decodeTokens(maxNew)
         if (ids.isEmpty()) return ""
         return tokenizer?.decode(ids.toIntArray())?.trim() ?: ids.joinToString(" ")
