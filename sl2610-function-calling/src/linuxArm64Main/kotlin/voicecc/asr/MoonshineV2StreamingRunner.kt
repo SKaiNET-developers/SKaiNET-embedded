@@ -128,9 +128,28 @@ public class MoonshineV2StreamingRunner(
 
     // ---- SEAM 1: frontend (audio → feature frames + streaming conv state) ----
 
+    // MOONSHINE_V2_FRONTEND_DSL=1 uses the self-compiled DSL frontend (@main, moonshineV2Frontend) instead of
+    // the vendor ONNX frontend (@main_graph) — zero vendor neural binaries. The DSL frontend is NON-streaming
+    // (fixed [1, feSamples] audio → features, no conv-state carry), so a chunk is padded/truncated to feSamples;
+    // feed the whole utterance in one call. feSamples must match the compiled MOONSHINE_V2_FE_SAMPLES.
+    private val frontendDsl = getenv("MOONSHINE_V2_FRONTEND_DSL")?.toKString() == "1"
+    private val feSamples = getenv("MOONSHINE_V2_FE_SAMPLES")?.toKString()?.toIntOrNull() ?: 80000
+
     /** Feed newly-arrived 16 kHz audio samples; runs the conv frontend (threading its streaming state) and
      *  pushes the produced feature frames through the encoder/adapter pipeline. */
     fun feedAudio(samples: FloatArray) {
+        if (frontendDsl) {
+            val audio = FloatArray(feSamples) { if (it < samples.size) samples[it] else 0f }
+            Bin.writeBytes("$work/f_audio.bin", Bin.f32Bytes(audio))
+            val feFile = "$work/f_feat.bin"
+            if (!torq.run(frontendVmfb, ENTRY_FN, device,
+                    listOf(TorqRunModule.Spec("1x$feSamples", "f32", "$work/f_audio.bin")), listOf(feFile))) {
+                println("[v2] DSL frontend failed"); return
+            }
+            val feat = Bin.readF32(feFile)
+            if (feat.isNotEmpty()) feed(feat)
+            return
+        }
         Bin.writeBytes("$work/f_audio.bin", Bin.f32Bytes(samples))
         val out = listOf(
             "$work/f_feat.bin", "$work/f_sb.bin", "$work/f_sl.bin", "$work/f_c1.bin", "$work/f_c2.bin", "$work/f_fc.bin",
