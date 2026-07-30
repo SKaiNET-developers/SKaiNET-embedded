@@ -3,6 +3,17 @@
 Low-latency, chunked ASR on the board (done-when #6). The model pieces are authored in the DSL; this is the
 board-side **runtime** that drives them incrementally instead of on a fixed full-utterance clip.
 
+> **✅ Phase C DONE (2026-07-30): the fully-DSL v2 ASR runs END-TO-END on the SL2610.** All five
+> self-compiled DSL vmfbs — frontend, encoder, adapter, masked prefill, and the **dynamic-cache
+> with_past** (`tensor<1x8x?x40>` self-cache, the SKaiNET#891 dynamic-shape capability on real HW) —
+> verified bit-exact on the board (cos ≥ 0.9999999 vs host x86 golden). A greedy decode with prefill +
+> growing with_past executing on the board (`scripts/board/moonshine-v2/board_decode.py`) yields
+> `[18274,1898,29973,2]` — token-for-token identical to ONNX → **" Ever tried?"** (beckett.wav first
+> window). Compile with `scripts/compile-cpu-arm64-docker.sh` (pinned `sl2610-iree:v2.0.0`, llvm-cpu
+> aarch64); run on `torq2-stable`. See `scripts/board/moonshine-v2/README.md` for the full harness +
+> per-stage latencies. Remaining is productization (native runner binary for a wall-clock latency/turn),
+> not correctness. This retires the "provenance follow-up" north star below — no vendor neural binaries.
+
 ## Pipeline (all pieces DSL-authored)
 ```
 audio 20ms frames → [v2 encoder] → [v2 adapter] → [causal KV decoder] → provisional/finalized tokens
