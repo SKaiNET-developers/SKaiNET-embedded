@@ -35,9 +35,12 @@ public fun runPipeline(
     println("[1/4 asr]   \"$text\"")
 
     // 2+3) Octopus-v2 prompt -> greedy decode -> parsed tool calls.
-    // GEMMA_KV=1 opts into the KV-cache 2-graph decode (prefill + with_past vmfbs, perf-program Phase 2);
-    // default is the shipping fixed-seq re-decode. Both return a GemmaDecoder.Generation.
-    val useKv = getenv("GEMMA_KV")?.toKString()?.trim() == "1"
+    // The KV-cache 2-graph decode (prefill + with_past vmfbs, perf-program Phase 2) is the DEFAULT since
+    // its SL2610 verification of 2026-08-11 (#249: oracle token parity, 2139 vs 4419 ms/token measured —
+    // see docs/PERF-LOGBOOK.md). GEMMA_KV=0 falls back to the fixed-seq re-decode. Needs the KV vmfbs +
+    // per-graph irpas from `GEMMA_KV=1 scripts/compile-gemma.sh board` and a skainet-transformers with
+    // the board-verified GemmaKvDecoder (kFirstInOutput=true, per-graph archives; > 0.39.0).
+    val useKv = getenv("GEMMA_KV")?.toKString()?.trim() != "0"
     val g = if (useKv) {
         GemmaKvDecoder(
             prefillVmfb = "$ireeDir/gemma-prefill.vmfb",

@@ -1,21 +1,39 @@
 # FunctionGemma KV-cache 2-graph board loop — implementation + board bring-up
 
-This completes **Phase 2** of the perf program (see `PERF-LOGBOOK.md`). The DSL decoder
+This completes **Phase 2** of the perf program (see the sl2610 demo's `PERF-LOGBOOK.md`). The DSL decoder
 (`GemmaModel.forwardPrefill`/`forwardWithPast`) is CPU-verified token-for-token; the two board graphs export
-and are host-verified. The **native board runtime loop is now DRAFTED and compiles for `linuxArm64`**:
+and compile. The native board runtime loop:
 - `IreeRuntime.invokeFiles(...)` — raw-bin file I/O (gemma-iree).
 - `GemmaKvDecoder` — the prefill→with_past loop + host `splitHalfCosSin` + `Bin` raw-f32/i32 I/O (gemma-iree).
 - Wired into the demo `Pipeline.runPipeline` behind `GEMMA_KV=1` (re-decode stays default).
 
-It is **board-UNVERIFIED** — it can't run off-board. Two things MUST be confirmed on the first SL2610 run,
-both caught by the oracle token-parity check (this doc's constants/arg-order are the reference):
+## BOARD-VERIFIED (SL2610, 2026-08-11)
+
+The full prefill→with_past loop reproduces the oracle `[262146,236769,3255,718,498,1373,262152,106]`
+token-for-token (`"turn the light on"` → `set_lights`). Every open unknown resolved:
+
+| unknown | resolution |
+|---|---|
+| per-block K-vs-V output order | **K then V** (`GemmaKvDecoder.kFirstInOutput=true`) — the draft's return-SSA "V,K" hint was wrong; the emitted MLIR's layer-0 return pair is `concat(K_in,·), concat(V_in,·)` (K = the RoPE'd+normed projection), and the K-first mapping matches the oracle |
+| `--output=@file` format | extension-driven: `@file.bin` = RAW little-endian bytes (what `Bin` assumes); `@file.npy` would add a NumPy header |
+| `gemma_with_past` input arg order | exactly as traced/documented below — confirmed against the compiled vmfb |
+| dynamic `1x1x?x256` cache | the g165 Torq-fork `iree-compile` ACCEPTS the true-dynamic MLIR and one vmfb served every position (no `GEMMA_SENTINEL_PAST=1` fallback needed) |
+| `--task_topology_group_count` | accepted by the board `iree-run-module` (g165) |
+| **shared irpa — NEW finding** | the "one shared `gemma-gen.irpa`" contract is **invalid**: every trace numbers its `model` externals independently (`t0`, `t10`, …), so each graph needs the archive written from ITS trace. `exportPrefill`/`exportWithPast` now write `gemma-prefill.safetensors` / `gemma-with-past.safetensors` (converted to `gemma-prefill.irpa` / `gemma-with-past.irpa`); `GemmaKvDecoder` derives those paths from its `irpa` arg. Binding the wrong archive fails loudly (`NOT_FOUND … no parameter found in index with key 'tN'`). |
+
+Measured (subprocess `iree-run-module`, `--task_topology_group_count=2`, 13-token prompt, 8 tokens):
+re-decode **4419 ms/token**; KV loop **2139 ms/token** avg (steady-state **~1740 ms/token** once the irpa
+mmap is warm) + one-off prefill 5956 ms.
+
+Historical bring-up notes below (the constants/arg-order remain the reference):
 
 ## The two graphs (build with `GEMMA_KV=1 scripts/compile-gemma.sh board`)
 
 - `gemma-prefill.vmfb` — `func @gemma_prefill`. Input: `{seq}xi32` token ids (fixed `seq`, prompt zero-padded).
   Outputs: `{seq}xi32` argMax tokens + **18 self-K + 18 self-V** `[1,1,seq,256]` (initial cache).
 - `gemma-with-past.vmfb` — `func @gemma_with_past`. **Dynamic** `?` cache. See exact I/O below.
-- Both share `gemma-gen.irpa` (same `model` external weights as the shipping re-decode graph).
+- Each binds its OWN parameter archive (`gemma-prefill.irpa` / `gemma-with-past.irpa`) — per-trace key
+  numbering, see the board-verified table above.
 
 ## Model constants (gemma3-270M, probed from the GGUF)
 
@@ -41,12 +59,12 @@ introduced { inputs += cos[t], sin[t]; introduced+=t }; inputs += K[i], V[i] }`.
 
 **Outputs**: 36 `1x1x{P+1}x256xf32` (extended K/V) then `1xi32` token **last**.
 
-### ⚠️ CAVEAT — verify K-vs-V order on the FIRST board run
-Within each block the two cache tensors are `fullK` and `fullV`, but the converter's terminal ordering means
-the emitted order may be **V then K**, not K then V (SSA analysis of the return statement suggests V,K). This
-is a silent-corruption trap. On first bring-up, confirm by: run one `with_past` step from a known prefill
-state and check the produced token matches the oracle; if it's garbage, swap the per-block K/V assignment.
-(Better: have the export emit a tiny `.manifest` mapping each output slot → role — a good follow-up.)
+### K-vs-V order — RESOLVED (board-verified 2026-08-11)
+The emitted order is **K then V** per block (`kFirstInOutput=true`). The draft's return-SSA reading
+("suggests V,K") was wrong: the return pairs list the LATER-defined SSA value first, and per layer the
+K concat is emitted after the V concat's projection — read the defining ops, not the id order. Verified
+in the MLIR (layer-0 pair = `concat(K_in,·), concat(V_in,·)`) and by board oracle parity.
+(A tiny export-side `.manifest` mapping output slot → role is still a good follow-up.)
 
 ## Raw-bin tensor I/O (extend `IreeRuntime`, mirror `voicecc/asr/TorqRunModule`)
 

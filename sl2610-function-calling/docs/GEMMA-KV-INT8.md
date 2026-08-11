@@ -23,20 +23,24 @@ philosophy** step still required.
 - The decode graphs are **DSL/DAG-authored** (`GemmaModel.forwardPrefill`/`forwardWithPast` compose module
   forwards; `RoPE.buildSplitHalfCosSin` gives runtime-position cos/sin).
 
-## Open — board verification (needs the SL2610 + Torq-fork toolchain)
-Runbook: `docs/GEMMA-KV-BOARD-LOOP.md`. On the **first** board run, confirm (each is a silent-corruption trap):
-1. **Per-block K-vs-V output order** — `GemmaKvDecoder.kFirstInOutput=false` ((V,K) per return-SSA analysis);
-   flip to `true` if the first run produces garbage tokens.
-2. **`--output=@file` format** — `IreeRuntime.invokeFiles` assumes RAW bytes; if the board writes NumPy, strip
-   the `.npy` header on read.
-3. **`gemma_with_past` input arg order** — trace-derived; confirm against the compiled vmfb.
-4. **Dynamic-concat** — the sentinel-prime `7919`→`x?x` relax leaves real dynamic-shape inference to
-   `iree-compile`; confirm the `with_past` vmfb accepts `x?x256` (else fall back to fixed-pad+mask).
-5. **`--task_topology_group_count`** — confirm the board `iree-run-module` accepts the flag (gated to revert).
-6. Standing: vmfbs MUST be built with the **Torq-fork `iree-compile` (g165e12a)** (stock IREE 3.x "Ch" bytecode
-   is rejected).
-- **Success gate:** the KV loop reproduces the oracle and `PERF-LOGBOOK.md` shows the O(seq²)→O(seq) collapse.
-  Then make `GEMMA_KV=1` the default in `Pipeline.kt`.
+## Board verification — ✅ DONE 2026-08-11 (SL2610, g165 Torq-fork)
+Runbook: `docs/GEMMA-KV-BOARD-LOOP.md` (now carries the full resolution table). All six confirmed:
+1. **Per-block K-vs-V output order** — **K then V**: `GemmaKvDecoder.kFirstInOutput=true`. The draft's
+   return-SSA "(V,K)" analysis was WRONG (it read SSA id order, not the defining ops); oracle parity confirms.
+2. **`--output=@file` format** — extension-driven; `@file.bin` is RAW little-endian bytes (as
+   `IreeRuntime.invokeFiles` assumes). `.npy` would add a header.
+3. **`gemma_with_past` input arg order** — exactly as trace-derived; confirmed against the compiled vmfb.
+4. **Dynamic-concat** — the true-dynamic (`1x1x?x256`, T2.2/#248) MLIR compiles on the g165 Torq-fork and one
+   vmfb served every position. No `GEMMA_SENTINEL_PAST=1` rollback, no fixed-pad+mask fallback needed.
+5. **`--task_topology_group_count`** — accepted by the board `iree-run-module`.
+6. Torq-fork `iree-compile` (g165e12a) used for all three vmfbs (standing requirement holds).
+- **NEW finding:** the "3 graphs share one `gemma-gen.irpa`" assumption was invalid — each trace numbers its
+  `model` externals independently (`t0`, `t10`, …), so the prefill/with_past graphs need archives written
+  from THEIR traces (loud `NOT_FOUND … key 'tN'` otherwise). Fixed: `exportPrefill`/`exportWithPast` write
+  `gemma-prefill.safetensors`/`gemma-with-past.safetensors`, `compile-gemma.sh` converts per-graph irpas,
+  `GemmaKvDecoder` binds them.
+- **Success gate MET:** oracle reproduced token-for-token; `PERF-LOGBOOK.md` rows: 2139 ms/token (steady
+  ~1740) vs 4419 same-day re-decode. `GEMMA_KV` flipped to default-on in `Pipeline.kt` (#249).
 
 ## Open — int8 on-board
 - Numeric quality of per-row int8 from Q5_K (oracle check), decode speed, and the RAM claim (831→~415 MiB on

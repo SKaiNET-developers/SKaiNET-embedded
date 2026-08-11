@@ -16,8 +16,11 @@
 #
 # GEMMA_KV=1 — ALSO build the KV-cache 2-graph decode (perf program Phase 2): gemma-prefill.vmfb +
 #   gemma-with-past.vmfb (the latter with a DYNAMIC `1x1x?x256` self-cache — one vmfb serves every
-#   position). All three graphs share the one gemma-gen.irpa (same "model" external weights). The
-#   board's GemmaKvDecoder drives prefill-once + with_past-loop. NOT board-verified yet — opt-in.
+#   position), EACH with its own parameter archive (gemma-prefill.irpa / gemma-with-past.irpa): every
+#   trace numbers its "model" externals independently, so the redecode irpa does NOT serve the KV
+#   graphs (board-verified: NOT_FOUND on the first mismatched key). The board's GemmaKvDecoder drives
+#   prefill-once + with_past-loop. BOARD-VERIFIED 2026-08-11: oracle token parity + ~2.1x faster
+#   (2139 vs 4419 ms/token measured; see docs/PERF-LOGBOOK.md).
 #
 # GEMMA_QUANT=int8 — quantize the 2D matmul weights to per-row int8 in the compiled graph (Phase 5):
 #   ~half the irpa (831->~418 MiB — a real RAM win on the 1.9 GB board) + half the weight-read traffic.
@@ -72,9 +75,17 @@ echo ">> [1/3] DSL -> gemma-gen.mlir + bf16 gemma.safetensors${GEMMA_KV:+ (+ KV 
 ( cd "$TF" && GEMMA_GGUF="$GEMMA_GGUF" GEMMA_OUT_DIR="$MLIR" GEMMA_GRAPH="$GRAPHS" GEMMA_QUANT="${GEMMA_QUANT:-}" \
     ./gradlew -PuseLocalSkainet=true :llm-runtime:kgemma:exportFunctionGemma -q )
 
-echo ">> [2/3] gemma.safetensors -> gemma-gen.irpa  (iree-convert-parameters; shared by all graphs)"
-docker run --rm --user "$(id -u):$(id -g)" -v "$MLIR:/work" "$IREE_IMAGE" \
-    iree-convert-parameters --parameters=model=/work/gemma.safetensors --output=/work/gemma-gen.irpa
+echo ">> [2/3] safetensors -> irpa  (iree-convert-parameters; ONE archive PER graph — per-trace keys)"
+convert_irpa() {
+    rm -f "$MLIR/$2"   # iree-convert-parameters refuses to overwrite
+    docker run --rm --user "$(id -u):$(id -g)" -v "$MLIR:/work" "$IREE_IMAGE" \
+        iree-convert-parameters --parameters="model=/work/$1" --output="/work/$2" > /dev/null
+}
+convert_irpa gemma.safetensors gemma-gen.irpa
+if [ "$GEMMA_KV" = 1 ]; then
+    convert_irpa gemma-prefill.safetensors   gemma-prefill.irpa
+    convert_irpa gemma-with-past.safetensors gemma-with-past.irpa
+fi
 
 echo ">> [3/3] iree-compile (llvm-cpu, $TARGET) -> vmfb(s)"
 compile_one "$MLIR/gemma-gen.mlir" "$MLIR/gemma-gen.vmfb"
@@ -85,6 +96,6 @@ fi
 
 echo ">> done:"
 echo "   $MLIR/gemma-gen.{vmfb,irpa}   (re-decode — the shipping path)"
-[ "$GEMMA_KV" = 1 ] && echo "   $MLIR/gemma-prefill.vmfb + gemma-with-past.vmfb  (KV-cache 2-graph decode, share gemma-gen.irpa)"
+[ "$GEMMA_KV" = 1 ] && echo "   $MLIR/gemma-prefill.{vmfb,irpa} + gemma-with-past.{vmfb,irpa}  (KV-cache 2-graph decode, per-graph archives)"
 echo "   deploy to /home/root/ireetest/ on the board — the demo's GemmaDecoder / GemmaKvDecoder loads them."
 echo "   verified: 'turn the light on' -> [262146,236769,3255,718,498,1373,262152,106] = <tool_0>(state=\"on\")<end>"

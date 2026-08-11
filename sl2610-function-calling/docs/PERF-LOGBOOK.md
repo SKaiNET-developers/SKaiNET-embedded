@@ -24,15 +24,16 @@ Knobs: `GEMMA_TASK_GROUPS=N` (local-task worker groups = cores; default 2, `0` d
 | date | phase / change | seq | tokens | total ms | ms/token | child RSS | notes |
 |------|----------------|-----|--------|----------|----------|-----------|-------|
 | 2026-07-05 | **baseline** (fixed seq=24 re-decode, per-step subprocess, `drop_caches`, bf16→f32 load) | 24 | 8 | ~48000 | ~6000 | ~930 MB | starting point that motivated this program |
-| _pending_ | Phase 0 quick wins (remove `drop_caches`, `--task_topology_group_count=2`) | 24 | 8 | | | | warm-mmap + both cores; measure on board |
+| 2026-08-11 | Phase 0 quick wins on the re-decode path (no `drop_caches`, warm mmap, `--task_topology_group_count=2`, T2.1-deduped 537 MB irpa) | 24 | 8 | 35353 | **4419** | n/m | measured via the board `iree-run-module` sanity loop (subprocess, same graph); oracle token-exact |
+| 2026-08-11 | **Phase 2 — KV-cache 2-graph decode** (`gemma_prefill` once + dynamic-`?` `gemma_with_past` per token, per-graph irpas, topo=2) | 13+7 | 8 | 5956 + 14973 | **2139** (steady-state **~1740**) | n/m | oracle token-exact on the SL2610; first two steps ~3.1 s (cold irpa mmap), then ~1.74 s/token; prefill 5956 ms once. 2.1x the same-day re-decode, ~3.4x the 2026-07-05 baseline at steady state: each step computes 1 position instead of re-running all 24 |
 
 <!-- Append one row per phase after its on-board run. Keep the baseline row first. -->
 
 ## Phase ledger (status)
 
-- **Phase 0** — logbook + `VOICECC_PROFILE` harness + quick wins (remove `drop_caches`, thread count). _Code landed; awaiting board measurement._
+- **Phase 0** — logbook + `VOICECC_PROFILE` harness + quick wins (remove `drop_caches`, thread count). **✅ MEASURED 2026-08-11:** 4419 ms/token re-decode (row above).
 - **Phase 1** — KV-cache `with_past` Gemma decoder (DSL) + CPU token parity. **✅ DONE (CPU).** `GemmaModel.forwardPrefill`/`forwardWithPast`/`buildRopeCosSin` + `RoPE.buildSplitHalfCosSin`/split-half `forwardWithCosSin`. `FunctionGemmaWithPastCpuTest` drives the 2-graph KV loop eagerly and matches the oracle token-for-token `[262146,236769,3255,718,498,1373,262152,106]`. On-device speedup lands in Phase 2 (needs the compiled graphs + board loop).
-- **Phase 2** — export both graphs + board 2-graph runtime loop (the on-device KV win). _Export DONE (host-verified); board parts remain._
+- **Phase 2** — export both graphs + board 2-graph runtime loop (the on-device KV win). **✅ BOARD-VERIFIED 2026-08-11** (row above): oracle token parity, 2139 ms/token (steady ~1740) vs 4419 re-decode; `kFirstInOutput=true` (K then V), raw `--output=@file.bin`, dynamic-`?` vmfb accepted by the g165 Torq-fork, topology flag accepted. NEW: per-trace external-parameter numbering → per-graph irpas (`gemma-prefill.irpa`/`gemma-with-past.irpa`), exporter + `compile-gemma.sh` + `GemmaKvDecoder` updated. `GEMMA_KV` is now DEFAULT-ON in `Pipeline.kt` (opt-out `GEMMA_KV=0`; takes effect with the next skainet-transformers release > 0.39.0)._
   `FunctionGemmaExport.exportWithPast` → `func @gemma_with_past` and `exportPrefill` → `func @gemma_prefill`
   (bf16 externals, shared "model" irpa scope, argMax tails). **Riskiest unknown RESOLVED — with a correction:**
   a naive `-1` dynamic placeholder mis-infers `concat(?,1) = -1+1 = 0` → broken `1x1x0x256` OUTPUT caches
