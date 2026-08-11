@@ -1,12 +1,12 @@
 [versions]
-kotlin = "2.3.0"
+kotlin = "2.4.10"
 kotlinxCoroutines = "1.10.2"
 # SKaiNET-transformers BOM — pins skainet-transformers-* and re-exports
 # sk.ainet:skainet-bom so sk.ainet.core:skainet-* align too. With the default
 # composite build (settings.gradle.kts useLocalStack) these coordinates are
 # substituted by the sibling source checkouts; the version matters only when
 # useLocalStack=false resolves published artifacts.
-skainetTransformers = "0.39.0"
+skainetTransformers = "0.39.1"
 
 [libraries]
 kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
