@@ -19,7 +19,7 @@ Hardware mapping (matches the sample): **Moonshine ASR → Torq NPU**;
 - `SKaiNET/` (branch `feature/397-coral-npu-docs`) — NN DSL → StableHLO (`skainet-compile-hlo`), CPU backend, `.irpa` writer (`skainet-io-iree-params`).
 - `SKaiNET-transformers/` — Gemma/Llama runtimes, GGUF loader, `GGUFTokenizer`. **Consumed as the released `0.30.0` from Maven Central** (`sk.ainet.transformers:skainet-transformers-bom`); the board LLM comes in via the published `skainet-transformers-runtime-gemma-iree`. (The `-PuseLocalSkainet=true` composite build remains available in `SKaiNET-transformers` for local engine work, but this app no longer needs it.)
 - `sl2610-voice-cc/` — the Python reference app (Octopus‑v2 prompt, compact codec, Moonshine runner).
-- `skainet-whisper/` — UNRELATED sibling (a Whisper STT app for an Amlogic box). Not a dependency. See its `moonshine.md`.
+- `skainet-whisper/` — UNRELATED sibling (a Whisper STT app for a different Android device). Not a dependency. See its `moonshine.md`.
 - `build-mlir/` — scratch: vmfbs, .irpa, mlir, the `torqpkg`/`abenv`/`piperpkg` venvs.
 
 ## Module layout (this app — Gradle multi‑module)
