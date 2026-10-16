@@ -27,8 +27,8 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 | Part | State |
 |---|---|
 | TUI app (`:tui`) on fake engines, host + board | works |
-| Native IREE runtime, CPU + NPU in one process (C smoke test) | works; Kotlin/Native binding next |
-| Real engines (Moonshine, FunctionGemma) | next: cinterop binding + Linux engine factory |
+| Native IREE runtime, CPU + NPU in one process, from Kotlin (`:iree`, `iree-smoke`) | works on the board |
+| Real engines (Moonshine, FunctionGemma) | next: graphs compiled with the Torq-fork compiler, Linux engine factory |
 | Torq target for the Moonshine blueprint | blocked on NPU multi-dispatch zeros; see the board update |
 | Middleware client | pending protocol |
 | Board / Torq update 2.0 → 2.2 | procedure ready: [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md) |
@@ -42,6 +42,7 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 | `:presentation` | jvm, linuxX64, linuxArm64 | `AppViewModel`: engines, pipeline, golden set, cartridge flows, log |
 | `:tui` | linuxX64, linuxArm64 | the app: Mosaic terminal UI, `arecord` microphone, WAV replay |
 | `:server` | jvm | cartridge server the board downloads from |
+| `:iree` | linuxArm64 | in-process IREE runtime (CPU + Torq NPU): `IreeRuntime`, `IreeSession`, `IreeKv`, `iree-smoke` |
 
 ## Build and run
 
@@ -50,6 +51,8 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 ./gradlew :tui:linkDebugExecutableLinuxX64                          # run on the host:
 tui/build/bin/linuxX64/debugExecutable/hes-tui.kexe --wav some-16k-mono.wav
 BOARD=root@<board-ip> scripts/deploy-tui.sh                          # cross-build + install on the board
+native/iree-torq-runtime/build-dist.sh                               # once, before building :iree (Torq runtime + C shim)
+./gradlew :iree:linkIreeSmokeReleaseExecutableLinuxArm64             # board check: iree-smoke <cpu.vmfb> <torq.vmfb>
 ssh -t root@<board-ip> /home/root/hes-tui/hes-tui --mic plughw:1,0   # USB mic on card 1
 ```
 
