@@ -1,0 +1,20 @@
+{
+  "spec_version": "0.4",
+  "kind": "materialization-profile",
+  "blueprint": {
+    "id": "asr-moonshine-v2-streaming-iree",
+    "version": "0.1.0"
+  },
+  "target": "cpu-sl26xx",
+  "flavors": [
+    "en"
+  ],
+  "cartridge": {
+    "version": "0.1.0"
+  },
+  "signing": {
+    "keyid": "homeevensmarter-dev",
+    "signer": "Michal Harakal",
+    "key_ref": "CARTRIDGE_SIGNING_KEY"
+  }
+}

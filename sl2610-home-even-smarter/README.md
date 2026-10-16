@@ -28,7 +28,8 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 |---|---|
 | TUI app (`:tui`) on fake engines, host + board | works |
 | Native IREE runtime, CPU + NPU in one process, from Kotlin (`:iree`, `iree-smoke`) | works on the board |
-| Real engines (Moonshine, FunctionGemma) | next: graphs compiled with the Torq-fork compiler, Linux engine factory |
+| FunctionGemma NLU on the board (in-process, A55) | works: golden set 11/12 via `hes-nlu-check` (12/12 with the app's host rule), ~830 ms/token, RSS 1.3 GB |
+| Moonshine ASR on the board | graphs compiled for `cpu-sl26xx`; runtime binding (streaming session) next |
 | Torq target for the Moonshine blueprint | blocked on NPU multi-dispatch zeros; see the board update |
 | Middleware client | pending protocol |
 | Board / Torq update 2.0 → 2.2 | procedure ready: [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md) |
@@ -46,6 +47,10 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 
 ## Build and run
 
+Needs a sibling checkout of [SKaiNET-cartridge-blueprints](https://github.com/SKaiNET-developers/SKaiNET-cartridge-blueprints)
+at `../../SKaiNET-cartridge-blueprints` (included build; `-PblueprintsDir=<path>` to override) and, for the board
+binaries, `native/iree-torq-runtime/build-dist.sh`.
+
 ```
 ./gradlew :core:allTests :cartridges:allTests :server:test           # tests (JVM + linuxX64)
 ./gradlew :tui:linkDebugExecutableLinuxX64                          # run on the host:
@@ -61,6 +66,11 @@ set, `r` reset the home, `f` fakes on/off, `tab` cartridges (`i` fetch index, `d
 `l` load and warm up), `q` quit.
 
 Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --server http://<host-ip>:8080`.
+
+Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skainet/iree-compiler-torq`, profiles in
+`cartridges/profiles/`). Until the signed pack for that target exists, `scripts/stage-nlu-pack.sh` assembles an
+unsigned development pack from the recipe outputs; check it on the board with
+`hes-nlu-check <pack-dir>` (golden set, timings, peak memory).
 
 ## Board
 

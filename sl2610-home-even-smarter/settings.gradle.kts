@@ -20,6 +20,16 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
+// The cartridge blueprints (Kotlin API + build recipe, no weights) from a sibling checkout of
+// SKaiNET-cartridge-blueprints, as an included build. Override the location with -PblueprintsDir=<path>.
+val blueprintsDir = providers.gradleProperty("blueprintsDir").getOrElse("../../SKaiNET-cartridge-blueprints")
+includeBuild(blueprintsDir) {
+    dependencySubstitution {
+        substitute(module("sk.ainet.cartridge:nlu-functiongemma-270m-iree"))
+            .using(project(":blueprints:nlu-functiongemma-270m-iree"))
+    }
+}
+
 // :core = home domain, voice pipeline, engine contracts; :cartridges = cartridge store/downloader + engine factory;
 // :presentation = AppViewModel (no UI toolkit); :tui = the board app (Kotlin/Native, Mosaic);
 // :server = cartridge server (JVM) the board downloads its NPU cartridges from;

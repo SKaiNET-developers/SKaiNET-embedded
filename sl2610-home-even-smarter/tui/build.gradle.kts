@@ -12,6 +12,11 @@ kotlin {
             entryPoint = "sk.ainet.examples.smarthome.tui.main"
         }
     }
+    // Board check of the real NLU without the UI: hes-nlu-check <pack-dir> [sentence…]
+    linuxArm64().binaries.executable("nluCheck") {
+        baseName = "hes-nlu-check"
+        entryPoint = "sk.ainet.examples.smarthome.tui.nlucheck.main"
+    }
 
     sourceSets {
         commonMain.dependencies {

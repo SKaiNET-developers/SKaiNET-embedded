@@ -1,0 +1,32 @@
+{
+  "spec_version": "0.4",
+  "kind": "materialization-profile",
+  "blueprint": {
+    "id": "nlu-functiongemma-270m-iree",
+    "version": "0.1.0"
+  },
+  "target": "cpu-sl26xx",
+  "cartridge": {
+    "version": "0.1.0"
+  },
+  "license_acceptance": [
+    {
+      "source": "weights",
+      "license": "Gemma Terms of Use",
+      "terms_url": "https://ai.google.dev/gemma/terms",
+      "accepted_by": "Michal Harakal",
+      "accepted_at": "2026-09-27"
+    }
+  ],
+  "inputs": {
+    "tool-catalog": {
+      "path": "../catalogs/home-tools.v1.json",
+      "license": "MIT"
+    }
+  },
+  "signing": {
+    "keyid": "homeevensmarter-dev",
+    "signer": "Michal Harakal",
+    "key_ref": "CARTRIDGE_SIGNING_KEY"
+  }
+}

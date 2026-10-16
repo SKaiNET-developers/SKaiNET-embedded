@@ -6,6 +6,9 @@ kotlinx-io = "0.9.1"
 ktor = "3.5.2"
 logback = "1.6.3"
 mosaic = "0.18.0"
+# Same pins as the included SKaiNET-cartridge-blueprints build.
+skainet = "0.56.0"
+transformers = "0.56.1"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -25,6 +28,10 @@ ktor-serverPartialContent = { module = "io.ktor:ktor-server-partial-content-jvm"
 ktor-serializationKotlinxJson = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 mosaic-runtime = { module = "com.jakewharton.mosaic:mosaic-runtime", version.ref = "mosaic" }
+transformers-bom = { module = "sk.ainet.transformers:skainet-transformers-bom", version.ref = "transformers" }
+transformers-core = { module = "sk.ainet.transformers:skainet-transformers-core" }
+skainet-io-gguf = { module = "sk.ainet.core:skainet-io-gguf", version.ref = "skainet" }
+cartridge-nlu-functiongemma = { module = "sk.ainet.cartridge:nlu-functiongemma-270m-iree", version = "0.1.0" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

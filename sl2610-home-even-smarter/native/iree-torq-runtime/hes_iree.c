@@ -159,6 +159,30 @@ struct hes_session {
   iree_hal_device_t* device;  /* borrowed from the runtime */
 };
 
+static void unmap_file(void* user_data, iree_io_file_handle_primitive_t primitive) {
+  (void)user_data;
+  munmap(primitive.value.host_allocation.data, primitive.value.host_allocation.data_length);
+}
+
+/*
+ * Opens `path` as a read-only memory mapping wrapped in a host-allocation file handle. Parameters in such a file
+ * are imported by the CPU device without a copy, so the weights stay clean, evictable page cache instead of
+ * anonymous heap: a 0.5 GB archive per graph would otherwise exhaust a 2 GB board.
+ */
+static iree_status_t open_mapped(const char* path, iree_io_file_handle_t** out) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return iree_make_status(IREE_STATUS_NOT_FOUND, "cannot open %s", path);
+  off_t size = lseek(fd, 0, SEEK_END);
+  void* map = size > 0 ? mmap(NULL, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
+  close(fd);
+  if (map == MAP_FAILED) return iree_make_status(IREE_STATUS_INTERNAL, "cannot map %s", path);
+  iree_io_file_handle_release_callback_t release = {.fn = unmap_file, .user_data = NULL};
+  iree_status_t st = iree_io_file_handle_wrap_host_allocation(
+      IREE_IO_FILE_ACCESS_READ, iree_make_byte_span(map, (iree_host_size_t)size), release, iree_allocator_system(), out);
+  if (!iree_status_is_ok(st)) munmap(map, (size_t)size);
+  return st;
+}
+
 /*
  * New IREE session on `device`; with `irpa` its parameters are appended first (scope `scope`). On success
  * `*out_index` (when not NULL) receives the parameter index, retained, for callers that read the archive.
@@ -173,7 +197,7 @@ static iree_status_t open_session(hes_runtime* rt, iree_hal_device_t* device, co
       rt->instance, &options, device, iree_runtime_instance_host_allocator(rt->instance), &s->session));
   if (irpa) {
     iree_io_file_handle_t* file = NULL;
-    IREE_RETURN_IF_ERROR(iree_io_file_handle_open(IREE_IO_FILE_MODE_READ, iree_make_cstring_view(irpa), alloc, &file));
+    IREE_RETURN_IF_ERROR(open_mapped(irpa, &file));
     iree_io_parameter_index_t* index = NULL;
     iree_status_t st = iree_io_parameter_index_create(alloc, &index);
     if (iree_status_is_ok(st)) st = iree_io_parse_irpa_index(file, index, alloc);
