@@ -1,0 +1,26 @@
+# Torq compiler (iree-compile + Torq HAL plugin + iree-lld) for SL2610-family NPU vmfbs, from the GitHub release wheel.
+# Compiler and board runtime must be the same Torq version (board/board.lock).
+#
+#   2.0.0 (current board):  docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.0.0 board/docker
+#   2.2.1 (update target):  docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.2.1 \
+#                             --build-arg TORQ_VERSION=2.2.1 --build-arg MANYLINUX=2_39 \
+#                             --build-arg BASE=python:3.12-slim-trixie board/docker
+# The 2.2.1 wheel is manylinux_2_39 (glibc >= 2.39), hence the Debian trixie base; 2.0.0–2.2.0 are manylinux_2_28.
+ARG BASE=python:3.12-slim
+FROM ${BASE}
+
+ARG TORQ_VERSION=2.0.0
+ARG MANYLINUX=2_28
+ARG TORQ_WHEEL_URL=https://github.com/synaptics-torq/torq-compiler/releases/download/v${TORQ_VERSION}/torq_compiler-${TORQ_VERSION}-cp312-cp312-manylinux_${MANYLINUX}_x86_64.whl
+
+RUN apt-get update && apt-get install -y --no-install-recommends binutils ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir "${TORQ_WHEEL_URL}"
+
+# A Torq vmfb links aarch64 host code; compile-entry.sh shims `ld` to the bundled iree-lld.
+ENV MLIRLIBS=/usr/local/lib/python3.12/site-packages/iree/compiler/_mlir_libs
+COPY compile-entry.sh /usr/local/bin/compile-entry.sh
+RUN chmod +x /usr/local/bin/compile-entry.sh && "${MLIRLIBS}/iree-compile" --version
+
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/compile-entry.sh"]

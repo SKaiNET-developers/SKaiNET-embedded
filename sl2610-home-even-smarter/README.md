@@ -63,8 +63,11 @@ Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --ser
 
 - [`board/board.lock`](board/board.lock): the board image ↔ Torq toolchain ↔ runtime set the app is verified against.
 - `scripts/board-audit.sh`: read-only drift check against the lock.
+- `scripts/board-canaries.sh`: NPU canary gate for a (Torq compiler, board runtime) pair.
 - `scripts/board-backup.sh`: save what a reflash would destroy.
-- [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md): the board image / Torq tools / NPU update procedure.
+- `scripts/board-update-download.sh`: images, Torq release files and the flashing tool, sha256-verified.
+- `board/docker/Dockerfile.torq-compiler`: the Torq compiler image for a given version.
+- [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md): step-by-step board image / Torq tools / NPU update.
 
 The board userland is BusyBox: there is no rsync or sftp, so files are streamed with `ssh cat`. Kotlin/Native
 binaries link `libcrypt.so.1` while the board ships `.so.2`. `deploy-tui.sh` handles both.
