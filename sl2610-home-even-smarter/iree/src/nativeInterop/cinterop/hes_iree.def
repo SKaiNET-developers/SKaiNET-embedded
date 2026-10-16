@@ -1,0 +1,6 @@
+# The C API in native/iree-torq-runtime/hes_iree.h over the Torq-fork IREE runtime (static).
+# Include and library paths come from iree/build.gradle.kts (native/iree-torq-runtime/dist, from build-dist.sh).
+headers = hes_iree.h
+package = sk.ainet.examples.smarthome.iree.native
+staticLibraries = libhes_iree.a libiree_torq_runtime.a
+linkerOpts = -Bstatic -lstdc++ -lstdc++fs -Bdynamic -lm -ldl -lpthread

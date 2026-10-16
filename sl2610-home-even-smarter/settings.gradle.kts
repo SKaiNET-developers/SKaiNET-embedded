@@ -22,5 +22,6 @@ plugins {
 
 // :core = home domain, voice pipeline, engine contracts; :cartridges = cartridge store/downloader + engine factory;
 // :presentation = AppViewModel (no UI toolkit); :tui = the board app (Kotlin/Native, Mosaic);
-// :server = cartridge server (JVM) the board downloads its NPU cartridges from.
-include(":core", ":cartridges", ":presentation", ":tui", ":server")
+// :server = cartridge server (JVM) the board downloads its NPU cartridges from;
+// :iree = in-process IREE runtime (CPU + Torq NPU) for the board, over native/iree-torq-runtime.
+include(":core", ":cartridges", ":presentation", ":tui", ":server", ":iree")
