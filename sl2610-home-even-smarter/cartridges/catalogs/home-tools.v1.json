@@ -1,0 +1,157 @@
+{
+  "id": "home-tools.v2",
+  "languages": [
+    "en"
+  ],
+  "functions": [
+    {
+      "name": "set_light",
+      "description": "Turn the light in a room on or off. Only for lights and lamps; never for temperature or heating.",
+      "parameters": {
+        "room": {
+          "type": "string",
+          "description": "The room whose light to change.",
+          "enum": [
+            "living_room",
+            "kitchen",
+            "bedroom",
+            "bathroom",
+            "hallway"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "description": "Whether the light should be on or off.",
+          "enum": [
+            "on",
+            "off"
+          ]
+        },
+        "brightness": {
+          "type": "string",
+          "description": "Light brightness in percent from 0 to 100, only when the user says a percentage or dim/bright. Never a temperature."
+        }
+      },
+      "required": [
+        "room",
+        "state"
+      ]
+    },
+    {
+      "name": "set_thermostat",
+      "description": "Set the heating temperature of a room or of the whole house. Use this whenever the user names degrees, a temperature, warmer or colder.",
+      "parameters": {
+        "room": {
+          "type": "string",
+          "description": "The room to heat or cool. Omit for the whole home.",
+          "enum": [
+            "living_room",
+            "kitchen",
+            "bedroom",
+            "bathroom",
+            "hallway"
+          ]
+        },
+        "temperature": {
+          "type": "string",
+          "description": "Target temperature in degrees Celsius, for example 21. Any number of degrees the user says goes here."
+        }
+      },
+      "required": [
+        "temperature"
+      ]
+    },
+    {
+      "name": "set_blinds",
+      "description": "Open, close or half-open the window blinds in a room.",
+      "parameters": {
+        "room": {
+          "type": "string",
+          "description": "The room whose blinds to move.",
+          "enum": [
+            "living_room",
+            "kitchen",
+            "bedroom",
+            "bathroom",
+            "hallway"
+          ]
+        },
+        "position": {
+          "type": "string",
+          "description": "The blind position to move to.",
+          "enum": [
+            "open",
+            "closed",
+            "half"
+          ]
+        }
+      },
+      "required": [
+        "room",
+        "position"
+      ]
+    },
+    {
+      "name": "set_lock",
+      "description": "Lock or unlock a door of the house.",
+      "parameters": {
+        "door": {
+          "type": "string",
+          "description": "Which door to lock or unlock.",
+          "enum": [
+            "front_door",
+            "back_door"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "description": "Whether the door should be locked or unlocked.",
+          "enum": [
+            "locked",
+            "unlocked"
+          ]
+        }
+      },
+      "required": [
+        "door",
+        "state"
+      ]
+    },
+    {
+      "name": "set_scene",
+      "description": "Activate a scene that sets several devices at once: morning, movie, night or away.",
+      "parameters": {
+        "scene": {
+          "type": "string",
+          "description": "The scene to activate.",
+          "enum": [
+            "morning",
+            "movie",
+            "night",
+            "away"
+          ]
+        }
+      },
+      "required": [
+        "scene"
+      ]
+    },
+    {
+      "name": "get_status",
+      "description": "Report the current state of the devices in a room, or of the whole home.",
+      "parameters": {
+        "room": {
+          "type": "string",
+          "description": "The room to report on. Omit for the whole home.",
+          "enum": [
+            "living_room",
+            "kitchen",
+            "bedroom",
+            "bathroom",
+            "hallway"
+          ]
+        }
+      }
+    }
+  ]
+}

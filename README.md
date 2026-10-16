@@ -32,6 +32,7 @@ SKaiNET-embedded/
 │       ├── simulator.py       # MPACT simulator driver
 │       └── rgb2grayscale.mlir # Example model
 ├── sl2610-function-calling/   # Sample: Kotlin/Native FunctionGemma voice function-calling demo
+├── sl2610-home-even-smarter/  # Sample: hybrid-AI smart-home voice app (TUI) with NPU cartridges from blueprints
 └── LICENSE
 ```
 
@@ -43,6 +44,11 @@ SKaiNET-embedded/
   FunctionGemma LLM on CPU → action) running as a single cross-compiled aarch64 binary on the
   Astra Machina SL2610, built on SKaiNET with the DSL → StableHLO → IREE path. See its
   [README](sl2610-function-calling/README.md).
+- **[sl2610-home-even-smarter/](sl2610-home-even-smarter/)** — HomeEvenSmarter on the board: a hybrid-AI
+  smart-home voice app (USB mic → Moonshine ASR on the Torq NPU → FunctionGemma → home action, with escalation of
+  what the board cannot handle) as a Kotlin/Native terminal app. Models arrive as signed cartridges built from
+  public blueprints with the Torq toolchain; one in-process IREE runtime drives CPU and NPU. See its
+  [README](sl2610-home-even-smarter/README.md).
 
 ## Quick Start
 
