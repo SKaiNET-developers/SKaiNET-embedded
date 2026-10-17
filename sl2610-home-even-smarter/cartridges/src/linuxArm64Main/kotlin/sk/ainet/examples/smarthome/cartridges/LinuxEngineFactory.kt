@@ -65,7 +65,7 @@ object LinuxEngineFactory : EngineFactory {
         val pack = NluPackDir(packDir)
         val dev = PackDevices.of(packDir).of("decoder", device)  // the three KV graphs share one device
         val cache = Path(cacheDir, "nlu").also { SystemFileSystem.createDirectories(it) }
-        val config = FunctionGemmaEngine.Config()
+        val config = pack.chunk?.let { FunctionGemmaEngine.Config(chunk = it) } ?: FunctionGemmaEngine.Config()
         val engine = FunctionGemmaEngine(
             id = pack.id,
             catalog = ToolCatalog.load(pack.toolCatalog),
@@ -193,5 +193,5 @@ class FunctionGemmaNluEngine(private val engine: FunctionGemmaEngine) : NluEngin
         is NluResolution.Failed -> NluOutcome.Failed(r.reason, r.cause, r.timing?.toOutcome())
     }
 
-    private fun NluResolution.Timing.toOutcome() = NluOutcome.Timing(tokenizeMs, restoreMs, chunkMs, decodeMs, decodeTokens)
+    private fun NluResolution.Timing.toOutcome() = NluOutcome.Timing(tokenizeMs, restoreMs, chunkMs, decodeMs, decodeTokens, decodeCalls)
 }

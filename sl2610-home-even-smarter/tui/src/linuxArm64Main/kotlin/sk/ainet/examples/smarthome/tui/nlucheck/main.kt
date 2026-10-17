@@ -4,6 +4,8 @@ import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readString
+import sk.ainet.cartridge.nlu.functiongemma.PackDir
+import sk.ainet.examples.smarthome.cartridges.GgufTokenizer
 import sk.ainet.examples.smarthome.cartridges.LinuxEngineFactory
 import sk.ainet.examples.smarthome.engine.NluOutcome
 import sk.ainet.examples.smarthome.pipeline.GoldenSet
@@ -14,9 +16,18 @@ import kotlin.time.measureTimedValue
  * Board check for the real NLU: loads a FunctionGemma pack_dir into the in-process runtime, warms it up and runs
  * the golden set (or the given sentences) through the app's NluEngine contract, with timings and peak memory.
  * Usage: hes-nlu-check <pack-dir> [sentence…]
+ *        hes-nlu-check --tokens <pack-dir> <text…>   (the pack's tokenizer only: ids and pieces of each text)
  */
 fun main(args: Array<String>) {
-    if (args.isEmpty()) { println("usage: hes-nlu-check <pack-dir> [sentence…]"); exitProcess(2) }
+    if (args.isEmpty()) { println("usage: hes-nlu-check [--tokens] <pack-dir> [sentence…]"); exitProcess(2) }
+    if (args[0] == "--tokens") {
+        val tok = GgufTokenizer.open(PackDir(args[1]).tokenizerGguf.toString())
+        for (text in args.drop(2)) {
+            val ids = tok.encode(text)
+            println("${ids.size} tokens  ${ids.joinToString(" ") { "$it:" + tok.decode(intArrayOf(it)).replace("\n", "\\n") }}")
+        }
+        return
+    }
     LinuxEngineFactory.cacheDir = Path("/home/root/.homeevensmarter/cache")
     val engine = LinuxEngineFactory.functionGemma(args[0], log = { println("  [engine] $it") })
     val (_, warm) = measureTimedValue { engine.warmUp() }
@@ -41,9 +52,9 @@ fun main(args: Array<String>) {
             is NluOutcome.NoCall -> o.timing
             is NluOutcome.Failed -> o.timing
         }
-        val perTok = timing?.let { if (it.decodeTokens > 0) it.decodeMs / it.decodeTokens else 0 } ?: 0
+        val perCall = timing?.let { if (it.decodeCalls > 0) it.decodeMs / it.decodeCalls else 0 } ?: 0
         println("${if (ok) "OK  " else "MISS"} ${t.inWholeMilliseconds.toString().padStart(6)} ms  \"$text\" → $what" +
-            (timing?.let { "  [tok ${it.tokenizeMs} restore ${it.restoreMs} chunk ${it.chunkMs} decode ${it.decodeMs}/${it.decodeTokens}t = $perTok ms/t]" } ?: "") +
+            (timing?.let { "  [tok ${it.tokenizeMs} restore ${it.restoreMs} chunk ${it.chunkMs} decode ${it.decodeMs} ms, ${it.decodeTokens}t in ${it.decodeCalls} calls = $perCall ms/call]" } ?: "") +
             (if (expected != null && !ok) "  (want $expected)" else ""))
     }
     val sorted = ms.sorted()

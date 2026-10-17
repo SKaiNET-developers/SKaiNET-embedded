@@ -28,6 +28,9 @@ if a.lang:
     attrs["languages"] = a.lang
 if a.device:
     attrs["devices"] = dict(d.split("=", 1) for d in a.device)
+# a target that exports its graphs with another chunk (params.chunk) says so where the engine reads it
+if "chunk" in target.get("params", {}) and "runtime_hint" in attrs:
+    attrs["runtime_hint"] = dict(attrs["runtime_hint"], chunk=int(target["params"]["chunk"]))
 descriptor["attributes"] = attrs
 descriptor["note"] = f"unsigned development pack from the {a.target} recipe outputs (not materialized, not measured)"
 with open(os.path.join(a.pack, "descriptor.json"), "w") as f:

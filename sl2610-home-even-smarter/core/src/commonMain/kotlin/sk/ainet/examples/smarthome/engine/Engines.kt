@@ -39,7 +39,7 @@ sealed interface NluOutcome {
     data class Failed(val reason: String, val cause: Throwable? = null, val timing: Timing? = null) : NluOutcome
 
     /** Wall-clock breakdown of one resolve, in milliseconds — the pipeline panel draws these bars. */
-    data class Timing(val tokenizeMs: Long, val restoreMs: Long, val chunkMs: Long, val decodeMs: Long, val decodeTokens: Int) {
+    data class Timing(val tokenizeMs: Long, val restoreMs: Long, val chunkMs: Long, val decodeMs: Long, val decodeTokens: Int, val decodeCalls: Int = decodeTokens) {
         val totalMs: Long get() = tokenizeMs + restoreMs + chunkMs + decodeMs
         companion object { val NONE = Timing(0, 0, 0, 0, 0) }
     }
