@@ -74,7 +74,7 @@ struct hes_ms {
   hes_runtime* rt;
   hes_session fe, enc, adp, pre, step;  /* each on its stage's device (borrowed from the runtime) */
   int nl, hd, dim, enc_dim, rot;
-  int lag_budget_ms, fast_finish, verbose;
+  int lag_budget_ms, fast_finish, verbose, no_peek, partial_every;
   Vocab vocab;
   const float* embed; void* embed_map; size_t embed_len; /* [vocab.n][dim], mapped */
   float* rope_c, *rope_s;                                /* [MAXTOK + 4][hd] */
@@ -558,6 +558,8 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
   e->lag_budget_ms = !spec || spec->lag_budget_ms == 0 ? DEFAULT_LAG_BUDGET_MS : (spec->lag_budget_ms < 0 ? 0 : spec->lag_budget_ms);
   e->fast_finish = spec ? spec->fast_finish : 0;
   e->verbose = spec ? spec->verbose : 0;
+  e->no_peek = spec ? spec->no_peek : 0;
+  e->partial_every = spec && spec->partial_every > 0 ? spec->partial_every : 1;
   if (e->nl > MAXLAYERS) { hes__set_error("moonshine: %d layers, at most %d", e->nl, MAXLAYERS); goto fail; }
 
   e->vocab = vocab_load(vocab_bin);
@@ -630,7 +632,7 @@ const char* hes_ms_feed(hes_ms* e, const float* pcm, int32_t n) {
     behind = (now_ms() - e->t_first_feed) - (double)e->npcm * 1000.0 / 16000.0 > e->lag_budget_ms;
 
   /* Early peek: first words at ~0.72 s; window 0 recomputes the rows and the restart decode replaces the text. */
-  if (!e->peeked && e->win == 0 && produced >= PEEK_FRAMES && produced < CHUNK) {
+  if (!e->no_peek && !e->peeked && e->win == 0 && produced >= PEEK_FRAMES && produced < CHUNK) {
     double t0 = now_ms();
     int usable = produced - LOOKAHEAD > 0 ? produced - LOOKAHEAD : produced;
     if (process_window(e, 0, usable, 0, 1) == 0) {
@@ -651,6 +653,14 @@ const char* hes_ms_feed(hes_ms* e, const float* pcm, int32_t n) {
     int prev = e->ntoks;
     /* the first hops re-decode from scratch, later ones go incremental with the prefix locked */
     int restart = e->win <= RESTART_HOPS || e->ntoks == 0;
+    /* Partials only every partial_every-th hop (the restart hops always run): the skipped hops cost a window,
+     * not a decode. Like a dropped hop, this cannot change the final, which re-decodes from the memory. */
+    int skip = !restart && e->partial_every > 1 && (e->win % e->partial_every) != 0 && !e->fast_finish;
+    if (skip) {
+      note_evt(e, EVT_DROPPED, t0 - e->t_first_feed, now_ms() - t0, 0, 0);
+      hopped = 1;
+      continue;
+    }
     if (behind) {
       e->dropped++;
       note_evt(e, EVT_DROPPED, t0 - e->t_first_feed, now_ms() - t0, 0, 0);

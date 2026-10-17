@@ -122,6 +122,8 @@ typedef struct {
   int32_t fast_finish;    /* 1 = keep the incremental decode as the final instead of re-decoding exactly */
   int32_t skip_warmup;    /* 1 = no zero-input pass through every graph at create */
   int32_t verbose;        /* 1 = per-window / per-hop timing lines on stderr */
+  int32_t no_peek;        /* 1 = no early partial at ~0.72 s (saves one window + one decode per utterance) */
+  int32_t partial_every;  /* decode partials on every Nth hop only (0/1 = every hop); the final is unaffected */
 } hes_ms_spec;
 
 /*

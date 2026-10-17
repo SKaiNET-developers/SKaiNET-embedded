@@ -18,17 +18,23 @@ import kotlin.time.measureTimedValue
  * through the app's AsrEngine contract in 80 ms frames, paced like a microphone (or as fast as possible with
  * --fast), printing every partial with its time, the final, the latency after the last sample, the real-time factor
  * (RTF = time spent inside the engine, feed() + finish(), over the audio's duration) and peak memory.
- * Usage: hes-asr-check [--fast] [--verbose] [--lang en] <pack-dir> <file.wav>…
+ * Usage: hes-asr-check [--fast] [--verbose] [--peek] [--partials N] [--fast-finish] [--lang en] <pack-dir> <file.wav>…
+ * --peek turns the early partial back on, --partials 1 decodes a partial on every hop (the app defaults are off and 2).
  */
 fun main(args: Array<String>) {
-    val flags = args.filter { it.startsWith("--") && it != "--lang" }.toSet()
-    val lang = args.indexOf("--lang").takeIf { it >= 0 }?.let { args.getOrNull(it + 1) } ?: "en"
-    val positional = args.filterIndexed { i, a -> !a.startsWith("--") && (i == 0 || args[i - 1] != "--lang") }
+    val valued = setOf("--lang", "--partials")
+    val flags = args.filter { it.startsWith("--") && it !in valued }.toSet()
+    fun value(name: String) = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
+    val lang = value("--lang") ?: "en"
+    val positional = args.filterIndexed { i, a -> !a.startsWith("--") && (i == 0 || args[i - 1] !in valued) }
     if (positional.size < 2) { println("usage: hes-asr-check [--fast] [--verbose] [--lang en] <pack-dir> <file.wav>…"); exitProcess(2) }
     val realTime = "--fast" !in flags
 
     val (engine, load) = measureTimedValue {
-        LinuxEngineFactory.moonshine(positional[0], lang, spec = MoonshineSpec(verbose = "--verbose" in flags))
+        LinuxEngineFactory.moonshine(positional[0], lang, spec = MoonshineSpec(
+            verbose = "--verbose" in flags, earlyPeek = "--peek" in flags, partialEvery = value("--partials")?.toInt() ?: MoonshineSpec().partialEvery,
+            fastFinish = "--fast-finish" in flags,
+        ))
     }
     val (session, open) = measureTimedValue { engine.open() }
     println("load ${load.inWholeMilliseconds} ms  open+warm-up ${open.inWholeMilliseconds} ms  ${engine.id} [${engine.language}]  rss-peak ${rssPeakMb()} MB")

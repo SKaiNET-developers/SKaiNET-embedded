@@ -174,6 +174,7 @@ class IreeRuntime(flags: List<String> = DEFAULT_FLAGS) : AutoCloseable {
         s.n_layers = spec.nLayers; s.head_dim = spec.headDim; s.rope_pairs = spec.ropePairs; s.dim = spec.dim
         s.enc_dim = spec.encDim; s.lag_budget_ms = spec.lagBudgetMs; s.fast_finish = if (spec.fastFinish) 1 else 0
         s.skip_warmup = if (spec.warmUp) 0 else 1; s.verbose = if (spec.verbose) 1 else 0
+        s.no_peek = if (spec.earlyPeek) 0 else 1; s.partial_every = spec.partialEvery
         val m = hes_ms_create(
             rt, s.ptr,
             devices.frontend, devices.encoder, devices.adapter, devices.decoder,
@@ -317,6 +318,10 @@ data class MoonshineSpec(
     val fastFinish: Boolean = false,
     val warmUp: Boolean = true,
     val verbose: Boolean = false,
+    /** The early partial at ~0.72 s (one extra window and decode per utterance). Off: the first partial comes ~0.5 s later. */
+    val earlyPeek: Boolean = false,
+    /** Decode partials on every Nth hop only; the exact final is unaffected. With int8 weights: RTF 0.95 → 0.73. */
+    val partialEvery: Int = 2,
 )
 
 /**
