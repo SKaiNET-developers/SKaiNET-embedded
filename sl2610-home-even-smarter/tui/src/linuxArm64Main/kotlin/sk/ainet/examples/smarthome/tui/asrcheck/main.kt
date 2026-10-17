@@ -16,7 +16,8 @@ import kotlin.time.measureTimedValue
 /**
  * Board check for the real ASR: loads a Moonshine pack_dir into the in-process runtime and streams 16 kHz mono WAVs
  * through the app's AsrEngine contract in 80 ms frames, paced like a microphone (or as fast as possible with
- * --fast), printing every partial with its time, the final, the latency after the last sample and peak memory.
+ * --fast), printing every partial with its time, the final, the latency after the last sample, the real-time factor
+ * (RTF = time spent inside the engine, feed() + finish(), over the audio's duration) and peak memory.
  * Usage: hes-asr-check [--fast] [--verbose] [--lang en] <pack-dir> <file.wav>…
  */
 fun main(args: Array<String>) {
@@ -33,6 +34,7 @@ fun main(args: Array<String>) {
     println("load ${load.inWholeMilliseconds} ms  open+warm-up ${open.inWholeMilliseconds} ms  ${engine.id} [${engine.language}]  rss-peak ${rssPeakMb()} MB")
 
     val frame = 1280
+    val rtfs = mutableListOf<Double>()
     for (file in positional.drop(1)) {
         val bytes = SystemFileSystem.source(Path(file)).buffered().use { it.readByteArray() }
         val rate = le32(bytes, 24)
@@ -41,11 +43,14 @@ fun main(args: Array<String>) {
         val start = TimeSource.Monotonic.markNow()
         var fed = 0
         var maxFeedMs = 0L
+        var computeUs = 0L  // time inside the engine: feed() + finish(), not the pacing sleeps
         while (fed < pcm.size) {
             val n = minOf(frame, pcm.size - fed)
             val t0 = TimeSource.Monotonic.markNow()
             val partial = session.feed(pcm.copyOfRange(fed, fed + n))
-            maxFeedMs = maxOf(maxFeedMs, t0.elapsedNow().inWholeMilliseconds)
+            val spent = t0.elapsedNow()
+            computeUs += spent.inWholeMicroseconds
+            maxFeedMs = maxOf(maxFeedMs, spent.inWholeMilliseconds)
             fed += n
             if (partial != null) println("   ${start.elapsedNow().inWholeMilliseconds.toString().padStart(6)} ms  partial \"$partial\"")
             if (realTime) {
@@ -56,15 +61,19 @@ fun main(args: Array<String>) {
         val audioMs = pcm.size * 1000L / 16_000
         val endOfAudio = start.elapsedNow()
         val (final, finish) = measureTimedValue { session.finish() }
+        computeUs += finish.inWholeMicroseconds
+        rtfs += computeUs / 1000.0 / audioMs
         val total = start.elapsedNow().inWholeMilliseconds
         val stats = engine.cartridge.lastStats
         println("FINAL \"$final\"  ${file.substringAfterLast('/')}  audio $audioMs ms  " +
             "finish ${finish.inWholeMilliseconds} ms (flush ${stats["flushMs"]} decode ${stats["decodeMs"]})  " +
             "after-last-sample ${total - minOf(audioMs, endOfAudio.inWholeMilliseconds).coerceAtLeast(0)} ms  " +
-            "rtf ${fmt(total.toDouble() / audioMs)}  max-feed $maxFeedMs ms  " +
-            "windows ${stats["windows"]} hops ${stats["hops"]} dropped ${stats["droppedDecodes"]} tokens ${stats["tokens"]} errors ${stats["errors"]}")
+            "RTF ${fmt(computeUs / 1000.0 / audioMs)} (compute ${computeUs / 1000} ms / audio)  max-feed $maxFeedMs ms  " +
+            "windows ${stats["windows"]} hops ${stats["hops"]} dropped ${stats["droppedDecodes"]} tokens ${stats["tokens"]} errors ${stats["errors"]}  " +
+            "decoder: ${stats["prefills"]} prefills ${stats["prefillMs"]} ms, ${stats["steps"]} steps ${stats["stepMs"]} ms")
         if ("--verbose" in flags) println("      timeline ${stats["timeline"]}")
     }
+    if (rtfs.isNotEmpty()) println("RTF mean ${fmt(rtfs.average())}  min ${fmt(rtfs.min())}  max ${fmt(rtfs.max())}  over ${rtfs.size} files (${if (realTime) "paced like a microphone: partial decodes beyond the lag budget are dropped" else "--fast: every partial decode runs"})")
     println("rss-peak ${rssPeakMb()} MB")
     engine.close()
 }

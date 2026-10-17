@@ -100,6 +100,7 @@ struct hes_ms {
   int pending, halted;
   double t_first_feed;
   int dropped, windows, hops, errors;
+  double prefill_ms, step_ms; int prefills, steps;  /* decoder cost split, per utterance */
   short evt_at[MAXEVT], evt_a[MAXEVT], evt_b[MAXEVT], evt_c[MAXEVT];
   unsigned char evt_kind[MAXEVT];
   int nevt;
@@ -356,6 +357,7 @@ static void fill_mask(hes_ms* e) {
 
 /* Prefill over the finalized memory: refreshes cross-K/V and, with `start_tokens`, restarts the token sequence. */
 static int run_prefill(hes_ms* e, int start_tokens) {
+  double tp = now_ms();
   size_t row = (size_t)e->dim;
   memcpy(e->mem256, e->mem, (size_t)e->nmem * row * sizeof(float));
   memset(e->mem256 + (size_t)e->nmem * row, 0, (size_t)(MAXMEM - e->nmem) * row * sizeof(float));
@@ -396,6 +398,7 @@ static int run_prefill(hes_ms* e, int start_tokens) {
     for (int l = 0; l < e->nl; ++l) { iree_hal_buffer_view_release(outs[4 * l]); iree_hal_buffer_view_release(outs[4 * l + 1]); }
   }
   iree_hal_buffer_view_release(logits);
+  e->prefill_ms += now_ms() - tp; e->prefills++;
   return 0;
 }
 
@@ -438,6 +441,7 @@ static int run_steps(hes_ms* e, int budget, int trim) {
   iree_hal_dim_t d = (iree_hal_dim_t)e->dim, hd = (iree_hal_dim_t)e->hd;
   int added = 0;
   while (e->ntoks > 0 && e->ntoks < MAXTOK && added < budget && e->pos < MAXTOK) {
+    double ts = now_ms();
     int last = e->toks[e->ntoks - 1];
     iree_hal_buffer_view_t* ev = mkview(e, &e->step, (iree_hal_dim_t[]){1, 1, d}, 3, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
                                         e->embed + (size_t)last * row, row * sizeof(float));
@@ -474,6 +478,7 @@ static int run_steps(hes_ms* e, int budget, int trim) {
     }
     int nxt = argmax_logits(e, outs[2 * e->nl]);
     iree_hal_buffer_view_release(outs[2 * e->nl]);
+    e->step_ms += now_ms() - ts; e->steps++;
     e->pos++;
     if (nxt == EOS) { e->halted = 1; e->ended_eos = 1; break; } /* tentative while streaming */
     e->toks[e->ntoks++] = nxt;
@@ -493,6 +498,7 @@ static void reset_utterance(hes_ms* e) {
   e->npcm = 0; e->win = 0; e->nmem = 0;
   e->peeked = 0; e->pending = 0; e->halted = 0; e->shown_len = 0;
   e->t_first_feed = 0.0; e->dropped = 0; e->windows = 0; e->hops = 0; e->nevt = 0; e->errors = 0;
+  e->prefill_ms = e->step_ms = 0.0; e->prefills = e->steps = 0;
   release_self(e); release_cross(e);
   e->ntoks = 0; e->pos = 0; e->text[0] = 0;
 }
@@ -710,11 +716,11 @@ const char* hes_ms_finish(hes_ms* e) {
   int n = snprintf(e->stats, sizeof e->stats,
                    "flushMs=%.0f,decodeMs=%.0f,finishMs=%.0f,finishAtMs=%.0f,lagMs=%.0f,droppedDecodes=%d,"
                    "windows=%d,hops=%d,memFrames=%d,tokens=%d,tokenBudget=%d,audioMs=%.0f,fastFinish=%d,lagBudgetMs=%d,"
-                   "errors=%d",
+                   "errors=%d,prefills=%d,prefillMs=%.0f,steps=%d,stepMs=%.0f",
                    t_flush - t0, now_ms() - t_flush, now_ms() - t0, e->t_first_feed > 0.0 ? t0 - e->t_first_feed : 0.0,
                    e->t_first_feed > 0.0 ? t0 - e->t_first_feed - (double)e->npcm * 1000.0 / 16000.0 : 0.0, e->dropped,
                    e->windows, e->hops, e->nmem, e->ntoks, finish_budget(e->npcm), (double)e->npcm * 1000.0 / 16000.0,
-                   e->fast_finish, e->lag_budget_ms, errors);
+                   e->fast_finish, e->lag_budget_ms, errors, e->prefills, e->prefill_ms, e->steps, e->step_ms);
   /* timeline=<kind>:<atMs>:<a>:<b>:<c>|... (w window: frontend/encoder/adapter, p peek, h hop, d dropped hop) */
   if (e->nevt > 0 && n > 0 && (size_t)n < sizeof e->stats) {
     n += snprintf(e->stats + n, sizeof e->stats - n, ",timeline=");
