@@ -341,6 +341,7 @@ struct hes_kv {
   int* len;
   int pos;
   uint8_t* embMap; size_t embMapLen; size_t embOff;
+  uint8_t* sclMap; size_t sclMapLen; size_t sclOff; /* int8 embedding: its f32 row scales; NULL for bf16 */
 };
 
 struct hes_kv_snapshot {
@@ -365,27 +366,49 @@ static void graph_alias(Graph* dst, const Graph* src, const char* fn) {
   dst->fn = strdup(fn);
 }
 
-/* mmaps just the vocab x hidden bf16 embedding entry of the archive (host gather). */
+/* mmaps one file-backed entry of the archive, page-aligned; *out points at its first byte. */
+static int map_entry(const char* irpa, const iree_io_parameter_index_entry_t* e, uint8_t** map, size_t* mapLen, size_t* off) {
+  if (e->type != IREE_IO_PARAMETER_INDEX_ENTRY_STORAGE_TYPE_FILE) return 0;
+  size_t at = (size_t)e->storage.file.offset;
+  int fd = open(irpa, O_RDONLY);
+  if (fd < 0) return 0;
+  long pageSizeL = sysconf(_SC_PAGESIZE);
+  size_t pageSize = pageSizeL > 0 ? (size_t)pageSizeL : 4096;
+  size_t alignedStart = (at / pageSize) * pageSize;
+  size_t alignedLen = (at - alignedStart) + (size_t)e->length;
+  alignedLen = ((alignedLen + pageSize - 1) / pageSize) * pageSize;
+  void* m = mmap(NULL, alignedLen, PROT_READ, MAP_PRIVATE, fd, (off_t)alignedStart);
+  close(fd);
+  if (m == MAP_FAILED) return 0;
+  *map = m; *mapLen = alignedLen; *off = at - alignedStart;
+  return 1;
+}
+
+/*
+ * mmaps the embedding entry of the archive (host gather): vocab x hidden bf16, or vocab x hidden int8 `<key>_q`
+ * with its vocab f32 row scales `<key>_s` (archives of int8 graphs).
+ */
 static int locate_embedding(hes_kv* k, const char* irpa, iree_io_parameter_index_t* index) {
-  uint64_t want = (uint64_t)k->vocab * (uint64_t)k->hidden * 2u;
+  uint64_t rows = (uint64_t)k->vocab * (uint64_t)k->hidden;
   iree_host_size_t n = iree_io_parameter_index_count(index);
   for (iree_host_size_t i = 0; i < n; ++i) {
     const iree_io_parameter_index_entry_t* e = NULL;
     if (!iree_status_is_ok(iree_io_parameter_index_get(index, i, &e)) || !e) continue;
-    if (e->length != want || e->type != IREE_IO_PARAMETER_INDEX_ENTRY_STORAGE_TYPE_FILE) continue;
-    size_t off = (size_t)e->storage.file.offset;
-    int fd = open(irpa, O_RDONLY);
-    if (fd < 0) return 0;
-    long pageSizeL = sysconf(_SC_PAGESIZE);
-    size_t pageSize = pageSizeL > 0 ? (size_t)pageSizeL : 4096;
-    size_t alignedStart = (off / pageSize) * pageSize;
-    size_t alignedLen = (off - alignedStart) + (size_t)want;
-    alignedLen = ((alignedLen + pageSize - 1) / pageSize) * pageSize;
-    void* map = mmap(NULL, alignedLen, PROT_READ, MAP_PRIVATE, fd, (off_t)alignedStart);
-    close(fd);
-    if (map == MAP_FAILED) return 0;
-    k->embMap = map; k->embMapLen = alignedLen; k->embOff = off - alignedStart;
-    return 1;
+    if (e->length == rows * 2u) return map_entry(irpa, e, &k->embMap, &k->embMapLen, &k->embOff);
+  }
+  for (iree_host_size_t i = 0; i < n; ++i) {
+    const iree_io_parameter_index_entry_t* e = NULL;
+    if (!iree_status_is_ok(iree_io_parameter_index_get(index, i, &e)) || !e) continue;
+    if (e->length != rows || e->key.size < 3 || memcmp(e->key.data + e->key.size - 2, "_q", 2) != 0) continue;
+    char key[256];
+    if (e->key.size >= sizeof key) continue;
+    memcpy(key, e->key.data, e->key.size); key[e->key.size] = 0;
+    key[e->key.size - 1] = 's';
+    const iree_io_parameter_index_entry_t* sc = NULL;
+    if (!iree_status_is_ok(iree_io_parameter_index_lookup(index, iree_make_cstring_view(key), &sc)) || !sc) continue;
+    if (sc->length != (uint64_t)k->vocab * 4u) continue;
+    return map_entry(irpa, e, &k->embMap, &k->embMapLen, &k->embOff) &&
+           map_entry(irpa, sc, &k->sclMap, &k->sclMapLen, &k->sclOff);
   }
   return 0;
 }
@@ -395,9 +418,16 @@ static void embed_rows(const hes_kv* k, const int32_t* toks, int n, int rows, fl
   for (int i = 0; i < n; ++i) {
     int32_t t = toks[i];
     if (t < 0 || t >= k->vocab) t = 0;
-    const uint16_t* src = (const uint16_t*)(k->embMap + k->embOff + (size_t)t * (size_t)k->hidden * 2u);
     float* dst = out + (size_t)i * (size_t)k->hidden;
-    for (int j = 0; j < k->hidden; ++j) { uint32_t b = ((uint32_t)src[j]) << 16; memcpy(&dst[j], &b, 4); }
+    if (k->sclMap) {
+      const int8_t* src = (const int8_t*)(k->embMap + k->embOff + (size_t)t * (size_t)k->hidden);
+      float s;
+      memcpy(&s, k->sclMap + k->sclOff + (size_t)t * 4u, 4);
+      for (int j = 0; j < k->hidden; ++j) dst[j] = (float)src[j] * s;
+    } else {
+      const uint16_t* src = (const uint16_t*)(k->embMap + k->embOff + (size_t)t * (size_t)k->hidden * 2u);
+      for (int j = 0; j < k->hidden; ++j) { uint32_t b = ((uint32_t)src[j]) << 16; memcpy(&dst[j], &b, 4); }
+    }
   }
 }
 
@@ -531,6 +561,7 @@ void hes_kv_release(hes_kv* k) {
   if (k->kv) release_views(k->kv, 2 * k->nLayers);
   graph_close(&k->prefill); graph_close(&k->chunk); graph_close(&k->withPast);
   if (k->embMap) munmap(k->embMap, k->embMapLen);
+  if (k->sclMap) munmap(k->sclMap, k->sclMapLen);
   free(k->kv); free(k->len); free(k);
 }
 
@@ -567,7 +598,7 @@ hes_kv* hes_kv_create(hes_runtime* rt, const char* device, const hes_kv_spec* sp
   iree_status_t st = hes__open_session(rt, dev, vWP, iWP, DEFAULT_SCOPE, &k->withPast.s, &wpIndex);
   if (iree_status_is_ok(st)) k->withPast.fn = strdup(fWP);
   if (iree_status_is_ok(st) && !locate_embedding(k, iWP, wpIndex))
-    st = iree_make_status(IREE_STATUS_NOT_FOUND, "no vocab x hidden bf16 embedding entry in the with-past archive");
+    st = iree_make_status(IREE_STATUS_NOT_FOUND, "no vocab x hidden embedding entry (bf16, or int8 + row scales) in the with-past archive");
   if (wpIndex) iree_io_parameter_index_release(wpIndex);
   if (shared) {
     if (iree_status_is_ok(st)) { graph_alias(&k->chunk, &k->withPast, fCH); graph_alias(&k->prefill, &k->withPast, fPF); k->hasPrefill = 1; }
