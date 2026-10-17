@@ -114,7 +114,7 @@ class LinuxMoonshineCartridge(
         val s = LinuxEngineFactory.runtime.moonshine(
             MoonshineFiles(
                 f.frontendVmfb.toString(), f.encoderVmfb.toString(), f.adapterVmfb.toString(), f.prefillVmfb.toString(),
-                f.stepVmfb.toString(), f.paramsIrpa.toString(), f.vocabBin.toString(), f.decEmbedBin.toString(),
+                f.stepVmfb.toString(), f.paramsIrpa?.toString(), f.vocabBin.toString(), f.decEmbedBin.toString(),
             ),
             devices, spec,
         )

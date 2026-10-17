@@ -300,7 +300,7 @@ class IreeKv internal constructor(private var handle: CPointer<hes_kv>?, val spe
 /** The eight files of one Moonshine v2 streaming model (cartridge pack layout, `artifacts/<role>/<lang>/`). */
 data class MoonshineFiles(
     val frontend: String, val encoder: String, val adapter: String, val prefill: String, val step: String,
-    val params: String, val vocab: String, val decEmbed: String,
+    val params: String?, val vocab: String, val decEmbed: String,
 )
 
 /** The device of each stage; prefill and step share [decoder]. */

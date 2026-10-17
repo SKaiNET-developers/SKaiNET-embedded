@@ -5,7 +5,7 @@
 #   scripts/stage-asr-pack.sh [target] [lang] [dest]
 #     (defaults: cpu-sl26xx, en, build/packs/asr-moonshine-v2-streaming-iree-<target>-dev)
 # Run the recipe first, in SKaiNET-cartridge-blueprints:
-#   ./gradlew :blueprints:asr-moonshine-v2-streaming-iree:{compile,parameters}<Lang>... -Pprofile=<profile>
+#   ./gradlew :blueprints:asr-moonshine-v2-streaming-iree:{compile<Lang><Graph>...,weights<Lang>} -Pprofile=<profile>
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-cpu-sl26xx}"
@@ -16,8 +16,8 @@ BP="${BLUEPRINTS_DIR:-$HERE/../../SKaiNET-cartridge-blueprints}/blueprints/asr-m
 M="$DEST/artifacts/model/$LANG_"; W="$DEST/artifacts/weights/$LANG_"; T="$DEST/artifacts/tokenizer/$LANG_"
 mkdir -p "$M" "$W" "$T"
 for g in frontend encoder adapter prefill step; do cp "$BP/compile/$TARGET/$LANG_/$g.vmfb" "$M/"; done
-cp "$BP/parameters/$LANG_/params.irpa" "$W/"
-cp "$BP/export/$LANG_/dec_embed.bin" "$W/"
+# dec_embed.bin, plus params.irpa when the target's decoder graphs read it (not with int8 decoder graphs)
+rm -f "$W"/*; cp "$BP/weights/$LANG_"/* "$W/"
 cp "$BP/export/$LANG_/vocab.bin" "$T/"
 # descriptor + manifest; the stage devices default to the CPU (override: ASR_DEVICES="encoder=torq ...")
 python3 -I "$HERE/scripts/finish-dev-pack.py" "$DEST" "$BP/../../../blueprint.json" "$TARGET" "$ID" --lang "$LANG_" \

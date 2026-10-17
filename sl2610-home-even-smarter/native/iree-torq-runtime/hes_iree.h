@@ -128,7 +128,8 @@ typedef struct {
 
 /*
  * Five graphs, each on its stage's device (frontend, encoder, adapter; prefill and step share the decoder device),
- * the decoder parameter archive, the vocabulary table and the decoder embedding rows. Runs one warm-up pass unless
+ * the decoder parameter archive (NULL when the decoder graphs carry their weights inline, e.g. int8), the vocabulary
+ * table and the decoder embedding rows. Runs one warm-up pass unless
  * the spec says otherwise. One utterance at a time; not thread-safe.
  */
 hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
