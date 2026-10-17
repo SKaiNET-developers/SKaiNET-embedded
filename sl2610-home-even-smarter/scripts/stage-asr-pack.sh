@@ -19,7 +19,7 @@ for g in frontend encoder adapter prefill step; do cp "$BP/compile/$TARGET/$LANG
 cp "$BP/parameters/$LANG_/params.irpa" "$W/"
 cp "$BP/export/$LANG_/dec_embed.bin" "$W/"
 cp "$BP/export/$LANG_/vocab.bin" "$T/"
-cat > "$DEST/descriptor.json" <<JSON
-{"id": "$ID", "version": "0.0.0-dev", "task": "asr", "target": {"hardware": "IREE-linux-aarch64 (SL26xx, Cortex-A55)", "abi": "linux-aarch64"}, "attributes": {"languages": ["$LANG_"]}, "note": "unsigned development pack from the $TARGET recipe outputs"}
-JSON
+# descriptor + manifest; the stage devices default to the CPU (override: ASR_DEVICES="encoder=torq ...")
+python3 -I "$HERE/scripts/finish-dev-pack.py" "$DEST" "$BP/../../../blueprint.json" "$TARGET" "$ID" --lang "$LANG_" \
+  $(for d in ${ASR_DEVICES:-frontend=local-task encoder=local-task adapter=local-task decoder=local-task}; do echo --device "$d"; done)
 du -sh "$DEST"; find "$DEST" -type f | sed "s|$DEST/||" | sort

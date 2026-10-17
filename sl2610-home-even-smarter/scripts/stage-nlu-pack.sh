@@ -18,7 +18,7 @@ for g in with-past prefill-with-past prefill-at; do
 done
 cp "$BP/sources/weights/functiongemma-270m-it-Q8_0.gguf" "$DEST/artifacts/tokenizer/"
 cp "$HERE/cartridges/catalogs/home-tools.v1.json" "$DEST/artifacts/other/tool-catalog.json"
-cat > "$DEST/descriptor.json" <<JSON
-{"id": "$ID", "version": "0.0.0-dev", "task": "nlu", "target": {"hardware": "IREE-linux-aarch64 (Synaptics SL26xx, Cortex-A55)", "abi": "linux-aarch64"}, "note": "unsigned development pack from the $TARGET recipe outputs"}
-JSON
+# descriptor + manifest (hashes 1.6 GB of parameters: ~10 s); the decoder device defaults to the CPU
+python3 -I "$HERE/scripts/finish-dev-pack.py" "$DEST" "$BP/../../blueprint.json" "$TARGET" "$ID" \
+  --device "decoder=${NLU_DEVICE:-local-task}"
 du -sh "$DEST"; find "$DEST" -type f | sed "s|$DEST/||" | sort

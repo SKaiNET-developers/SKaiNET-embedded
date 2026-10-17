@@ -30,6 +30,7 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 | Native IREE runtime, CPU + NPU in one process, from Kotlin (`:iree`, `iree-smoke`) | works on the board |
 | FunctionGemma NLU on the board (in-process, A55) | works: golden set 11/12 via `hes-nlu-check` (12/12 with the app's host rule), ~830 ms/token, RSS 1.3 GB |
 | Moonshine ASR on the board (in-process, A55) | works: streaming partials in real time, finals match the reference model on the test clips via `hes-asr-check`; final 2.3–2.7 s after the last sample, RSS 255 MB |
+| Whole app on the board (ASR + NLU + home, one process) | works: `hes-tui --load` / `hes-app-check`, spoken command → action in 21–37 s (NLU dominates), RSS 1.6 GB |
 | Torq target for the Moonshine blueprint | blocked on NPU multi-dispatch zeros; see the board update |
 | Middleware client | pending protocol |
 | Board / Torq update 2.0 → 2.2 | procedure ready: [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md) |
@@ -73,6 +74,12 @@ Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skaine
 `hes-nlu-check <pack-dir>` (golden set, timings, peak memory) and
 `hes-asr-check [--fast] [--verbose] <pack-dir> <file.wav>…` (16 kHz mono WAVs streamed like a microphone: partials,
 final, latency after the last sample, per-window stage costs).
+
+Install packs into the app's store on the board with `scripts/install-dev-packs.sh` (sends only what changed), then
+`hes-tui --load` starts on the real engines (or press `l`). `hes-app-check [--verify] <file.wav>… [-- typed…]` runs the
+same AppViewModel headless: installed cartridges, real engines, WAVs replayed as the microphone. Each pack's
+`descriptor.attributes.devices` places its graphs (`local-task` CPU, `torq` NPU, `vulkan` GPU; default CPU); the
+device preference overrides it.
 
 ## Board
 

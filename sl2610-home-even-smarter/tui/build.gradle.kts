@@ -22,6 +22,11 @@ kotlin {
         baseName = "hes-asr-check"
         entryPoint = "sk.ainet.examples.smarthome.tui.asrcheck.main"
     }
+    // Board check of the whole app (AppViewModel, installed cartridges, real engines) without the terminal UI.
+    linuxArm64().binaries.executable("appCheck") {
+        baseName = "hes-app-check"
+        entryPoint = "sk.ainet.examples.smarthome.tui.appcheck.main"
+    }
 
     sourceSets {
         commonMain.dependencies {

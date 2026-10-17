@@ -52,11 +52,9 @@ object LinuxEngineFactory : EngineFactory {
         spec: MoonshineSpec = MoonshineSpec(),
     ): MoonshineAsrEngine {
         val pack = AsrPackDir(packDir)
-        val dev = when (device) {
-            DevicePreference.AUTO, DevicePreference.CPU -> "local-task"
-            DevicePreference.GPU -> "vulkan"
-        }
-        return MoonshineAsrEngine(LinuxMoonshineCartridge(pack, language, MoonshineDevices.all(dev), spec))
+        val d = PackDevices.of(packDir)
+        val devices = MoonshineDevices(d.of("frontend", device), d.of("encoder", device), d.of("adapter", device), d.of("decoder", device))
+        return MoonshineAsrEngine(LinuxMoonshineCartridge(pack, language, devices, spec))
     }
 
     override fun nlu(cartridge: InstalledCartridge, device: DevicePreference): NluEngine =
@@ -65,10 +63,7 @@ object LinuxEngineFactory : EngineFactory {
     /** The NLU straight from a pack_dir (also used by the board check tool). */
     fun functionGemma(packDir: String, device: DevicePreference = DevicePreference.AUTO, log: (String) -> Unit = {}): FunctionGemmaNluEngine {
         val pack = NluPackDir(packDir)
-        val dev = when (device) {
-            DevicePreference.AUTO, DevicePreference.CPU -> "local-task"
-            DevicePreference.GPU -> "vulkan"
-        }
+        val dev = PackDevices.of(packDir).of("decoder", device)  // the three KV graphs share one device
         val cache = Path(cacheDir, "nlu").also { SystemFileSystem.createDirectories(it) }
         val config = FunctionGemmaEngine.Config()
         val engine = FunctionGemmaEngine(

@@ -186,7 +186,7 @@ class AppViewModel(val env: AppEnvironment, private val scope: CoroutineScope) {
     private fun rebuildPipeline() {
         val n = nlu ?: return
         pipelineJob?.cancel()
-        val p = VoicePipeline(asr, n, HomeActions(homeStore).router())
+        val p = VoicePipeline(asr, n, HomeActions(homeStore).router(), nluBudgetMs = env.nluBudgetMs)
         pipeline = p
         pipelineJob = scope.launch { p.events.collect(::onEvent) }
         scope.launch { p.state.collect { _pipelineState.value = it } }

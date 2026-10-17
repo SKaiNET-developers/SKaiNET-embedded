@@ -24,6 +24,9 @@ import sk.ainet.examples.smarthome.fakes.ReplayAudioSource
 import sk.ainet.examples.smarthome.pipeline.Endpointer
 import kotlin.system.exitProcess
 
+/** FunctionGemma on the board's CPU takes 10–33 s per command (LOG 2026-10-16 R3); the phone's 15 s would cut it off. */
+const val BOARD_NLU_BUDGET_MS: Long = 60_000
+
 private const val USAGE = """hes-tui — HomeEvenSmarter in the terminal
 
   --mic <pcm>      ALSA capture device for arecord, e.g. plughw:1,0 (default: ALSA default)
@@ -31,9 +34,10 @@ private const val USAGE = """hes-tui — HomeEvenSmarter in the terminal
   --wav <file>     replay a 16 kHz 16-bit mono WAV instead of the microphone (each talk replays it)
   --server <url>   cartridge server (persisted in settings.properties)
   --home <dir>     settings and cartridges (default: ~/.homeevensmarter)
+  --load           load the installed cartridges into the real engines at start (as the `l` key does)
 """
 
-private class Options(val mic: String?, val noMic: Boolean, val wav: String?, val server: String?, val home: String?) {
+private class Options(val mic: String?, val noMic: Boolean, val wav: String?, val server: String?, val home: String?, val load: Boolean) {
     companion object {
         fun parse(args: Array<String>): Options {
             val values = mutableMapOf<String, String>()
@@ -41,14 +45,14 @@ private class Options(val mic: String?, val noMic: Boolean, val wav: String?, va
             var i = 0
             while (i < args.size) {
                 when (val a = args[i]) {
-                    "--no-mic" -> flags += a
+                    "--no-mic", "--load" -> flags += a
                     "--mic", "--wav", "--server", "--home" -> { values[a] = args.getOrNull(i + 1) ?: usage("$a needs a value"); i++ }
                     "-h", "--help" -> usage(null)
                     else -> usage("unknown option $a")
                 }
                 i++
             }
-            return Options(values["--mic"], "--no-mic" in flags, values["--wav"], values["--server"], values["--home"])
+            return Options(values["--mic"], "--no-mic" in flags, values["--wav"], values["--server"], values["--home"], "--load" in flags)
         }
 
         private fun usage(problem: String?): Nothing {
@@ -67,6 +71,7 @@ fun main(args: Array<String>) {
     SystemFileSystem.createDirectories(cartridges)
     val settings = FileSettings(Path(home, "settings.properties"))
     opts.server?.let { settings.serverUrl = it }
+    LinuxEngineFactory.cacheDir = Path(home, "cache")  // the NLU's tokenized catalog prefix survives restarts
 
     val audio: AudioSource? = when {
         opts.wav != null -> ReplayAudioSource(SystemFileSystem.source(Path(opts.wav)).buffered().use { it.readByteArray() })
@@ -81,11 +86,13 @@ fun main(args: Array<String>) {
         settings = settings,
         startWithFakes = true,
         endpointer = Endpointer(),
+        nluBudgetMs = BOARD_NLU_BUDGET_MS,
     )
 
     runBlocking {
         val vmScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val vm = AppViewModel(env, vmScope)
+        if (opts.load) vm.loadAndWarmUp()
         lateinit var ui: Job
         ui = launch { runMosaic { TuiApp(vm, micLabel = micLabel(opts, audio), onQuit = { ui.cancel() }) } }
         ui.join()

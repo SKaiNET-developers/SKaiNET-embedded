@@ -17,6 +17,8 @@ class AppEnvironment(
     val startWithFakes: Boolean = !engineFactory.available,
     /** Ends an utterance on silence. Needed where the UI only sees a press (terminals report no key release). */
     val endpointer: Endpointer? = null,
+    /** How long one NLU resolve may take before the pipeline gives up. A phone needs seconds; a 2×A55 board ~10–35 s. */
+    val nluBudgetMs: Long = 15_000,
 ) {
     /** Two persisted strings are all the app needs. */
     interface Settings {

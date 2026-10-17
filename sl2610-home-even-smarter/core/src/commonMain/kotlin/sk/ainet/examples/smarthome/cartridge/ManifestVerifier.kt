@@ -22,6 +22,33 @@ object ManifestVerifier {
         }
         return Verification(problems.isEmpty(), manifest.artifacts.size, problems)
     }
+
+    /**
+     * The same check without holding an artifact in memory: [open] returns a reader for the artifact at `path` (or
+     * `null` when it is missing) that fills the buffer and returns the byte count, or -1 at the end. Needed where
+     * one artifact is a sizable share of RAM (a 0.5 GB parameter archive on a 2 GB board).
+     */
+    fun verifyStreaming(manifest: CartridgeManifest, open: (path: String) -> ChunkReader?): Verification {
+        val problems = mutableListOf<String>()
+        val buf = ByteArray(1 shl 20)
+        for (a in manifest.artifacts) {
+            val reader = open(a.path)
+            if (reader == null) { problems += "${a.path}: missing"; continue }
+            val sha = Sha256()
+            var size = 0L
+            reader.use { while (true) { val n = it.read(buf); if (n < 0) break; sha.update(buf, 0, n); size += n } }
+            if (size != a.size) { problems += "${a.path}: size $size != ${a.size}"; continue }
+            val actual = Sha256.toHex(sha.digest())
+            if (actual != a.digest.removePrefix("sha256:").lowercase()) problems += "${a.path}: sha256 $actual != ${a.digest}"
+        }
+        return Verification(problems.isEmpty(), manifest.artifacts.size, problems)
+    }
+
+    /** Sequential reads of one artifact. */
+    fun interface ChunkReader : AutoCloseable {
+        fun read(into: ByteArray): Int
+        override fun close() {}
+    }
 }
 
 /** SHA-256 (FIPS 180-4), dependency-free, streaming. */

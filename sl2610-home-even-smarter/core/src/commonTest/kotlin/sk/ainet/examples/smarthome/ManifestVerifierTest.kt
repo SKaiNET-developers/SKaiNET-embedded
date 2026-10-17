@@ -42,6 +42,23 @@ class ManifestVerifierTest {
     }
 
     @Test
+    fun `streaming verification reads in chunks and agrees with the in-memory check`() {
+        val manifest = CartridgeJson.manifest(
+            """{"schema_version":2,"id":"x","version":"0.1.0","digest_alg":"sha256",
+               "artifacts":[{"role":"model","path":"a","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size":3}]}""",
+        )
+        fun reader(text: String): ManifestVerifier.ChunkReader {
+            val bytes = text.encodeToByteArray(); var pos = 0
+            // one byte per read: the digest must not depend on chunk boundaries
+            return ManifestVerifier.ChunkReader { into -> if (pos == bytes.size) -1 else { into[0] = bytes[pos++]; 1 } }
+        }
+        assertTrue(ManifestVerifier.verifyStreaming(manifest) { reader("abc") }.ok)
+        assertTrue(ManifestVerifier.verifyStreaming(manifest) { reader("abd") }.problems.single().contains("sha256"))
+        assertTrue(ManifestVerifier.verifyStreaming(manifest) { reader("abcd") }.problems.single().contains("size 4"))
+        assertEquals("a: missing", ManifestVerifier.verifyStreaming(manifest) { null }.problems.single())
+    }
+
+    @Test
     fun `descriptor subset`() {
         val d = CartridgeJson.descriptor(
             """{"spec_version":"0.4","id":"asr-x","version":"0.1.0","family":"moonshine-v2-streaming","modality":"audio","task":"asr",

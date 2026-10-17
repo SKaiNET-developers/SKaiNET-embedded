@@ -3,7 +3,6 @@ package sk.ainet.examples.smarthome.cartridges
 import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
-import kotlinx.io.readByteArray
 import kotlinx.io.readString
 import sk.ainet.examples.smarthome.cartridge.CartridgeDescriptor
 import sk.ainet.examples.smarthome.cartridge.CartridgeJson
@@ -46,9 +45,21 @@ class CartridgeStore(val root: Path) {
     fun asr(): InstalledCartridge? = installed().firstOrNull { it.task == CartridgeKinds.TASK_ASR }
     fun nlu(): InstalledCartridge? = installed().firstOrNull { it.task == CartridgeKinds.TASK_NLU }
 
-    /** Full digest check of every artifact against the manifest (reads gigabytes for the NLU pack — call off the main thread). */
+    /**
+     * Full digest check of every artifact against the manifest, streamed in 1 MB chunks (reads gigabytes for the NLU
+     * pack — call off the main thread; never holds an artifact in memory).
+     */
     fun verify(cartridge: InstalledCartridge): Verification =
-        ManifestVerifier.verify(cartridge.manifest) { rel -> val p = cartridge.file(rel); if (fs.exists(p)) readBytes(p) else null }
+        ManifestVerifier.verifyStreaming(cartridge.manifest) { rel ->
+            val p = cartridge.file(rel)
+            if (!fs.exists(p)) null else {
+                val source = fs.source(p).buffered()
+                object : ManifestVerifier.ChunkReader {
+                    override fun read(into: ByteArray): Int = source.readAtMostTo(into, 0, into.size)
+                    override fun close() = source.close()
+                }
+            }
+        }
 
     /** Cheap check: every artifact present with the manifest's size. */
     fun complete(cartridge: InstalledCartridge): Boolean = cartridge.manifest.artifacts.all { a ->
@@ -64,5 +75,4 @@ class CartridgeStore(val root: Path) {
     }
 
     private fun readText(p: Path): String = fs.source(p).buffered().use { it.readString() }
-    private fun readBytes(p: Path): ByteArray = fs.source(p).buffered().use { it.readByteArray() }
 }
