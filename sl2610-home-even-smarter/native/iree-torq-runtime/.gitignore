@@ -1,4 +1,6 @@
 out/
 work/
+work-*/
 dist/
+dist-*/
 *.log

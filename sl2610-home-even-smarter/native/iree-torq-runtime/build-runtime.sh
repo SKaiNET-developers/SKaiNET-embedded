@@ -27,8 +27,9 @@ for sm in flatcc benchmark vulkan_headers; do
 done
 rmdir "$W/torq/third_party/iree" 2>/dev/null || true
 ln -sfn "$W/iree" "$W/torq/third_party/iree"
-# Optional experiment: accept exec-format v0 (prebuilt vendor encoder) when TORQ_ACCEPT_EXEC_V0=1.
-if [ "${ACCEPT_EXEC_V0:-1}" = 1 ] && ! grep -q TORQ_ACCEPT_EXEC_V0 "$W/torq/runtime/driver/TorqExecutable.cc"; then
+# Optional experiment: accept exec-format v0 (prebuilt vendor encoder) when TORQ_ACCEPT_EXEC_V0=1. Only for runtimes
+# that accept exactly version 2 (v2.0.0); v2.2.x accepts every version up to 2 by itself.
+if [ "${ACCEPT_EXEC_V0:-1}" = 1 ] && grep -q 'runtimeVersion != 2)' "$W/torq/runtime/driver/TorqExecutable.cc"; then
   patch -d "$W/torq" -p1 < "$HERE/patch-accept-exec-v0.diff"
 fi
 command -v ninja >/dev/null || { python3 -m venv "$W/venv" && "$W/venv/bin/pip" -q install ninja; export PATH="$W/venv/bin:$PATH"; }

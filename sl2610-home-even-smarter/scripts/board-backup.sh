@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
-# Copies what a reflash would destroy and cannot be regenerated from the host: vendor prebuilt models, example
-# assets, deployed runtimes and hand-made test files under /home/root. Read-only on the board; writes to DEST.
+# Copies what a reflash would destroy (the eMMC image rewrites the whole /home partition): everything under /home
+# except large trees that can be regenerated from the host or downloaded again. Read-only on the board; writes to DEST.
 #   BOARD=root@<ip> scripts/board-backup.sh [DEST]          (default DEST: build/board-backup/<date>)
-# Large regenerable trees (our compiled vmfb/irpa experiments, Python venvs) are listed but skipped unless FULL=1.
+# The skipped trees are listed in the inventory; FULL=1 includes them too.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 BOARD="${BOARD:?set BOARD=root@<board-ip>}"
 DEST="${1:-$HERE/build/board-backup/$(date +%Y%m%d-%H%M)}"
-KEEP=(moon sl2610-examples demos torq2-stable torq2 settings cmd.wav)
-SKIP=(ireetest ireetest-bf16 fcvenv venv-torqstable sl2610-voice-cc torq-v2.0.0-official)
+# relative to /home: compiled experiments, Python venvs, downloadable releases, installed and test packs
+SKIP=(root/ireetest root/ireetest-bf16 root/fcvenv root/venv-torqstable root/sl2610-voice-cc root/torq-v2.0.0-official
+      root/hes-p3 root/hes-p4 root/.homeevensmarter root/.cache/pip lost+found)
 mkdir -p "$DEST"
 
 echo "==> inventory"
-ssh "$BOARD" 'cd /home/root && du -sk * 2>/dev/null | sort -n' | tee "$DEST/inventory.txt"
+ssh "$BOARD" 'cd /home && du -sk * root/* root/.[a-z]* 2>/dev/null | sort -n' | tee "$DEST/inventory.txt"
 ssh "$BOARD" 'cat /etc/build*; uname -a; modinfo syna_npu; tr -d "\0" < /proc/device-tree/model' > "$DEST/board-info.txt" 2>&1 || true
 
-items=("${KEEP[@]}"); [ "${FULL:-0}" = 1 ] && items+=("${SKIP[@]}")
-for item in "${items[@]}"; do
-  if ssh "$BOARD" "[ -e '/home/root/$item' ]"; then
-    echo "==> $item"
-    ssh "$BOARD" "cd /home/root && tar cf - '$item'" | tar xf - -C "$DEST"
-  fi
-done
+excludes=(); [ "${FULL:-0}" = 1 ] || for s in "${SKIP[@]}"; do excludes+=("--exclude=$s"); done
+echo "==> /home"
+ssh "$BOARD" "cd /home && tar cf - ${excludes[*]} ." | tar xf - -C "$DEST"
 [ "${FULL:-0}" = 1 ] || echo "skipped (regenerable; FULL=1 to include): ${SKIP[*]}"
-( cd "$DEST" && find . -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS )
+( cd "$DEST" && find . -type f ! -name SHA256SUMS ! -name inventory.txt ! -name board-info.txt -exec sha256sum {} + > SHA256SUMS )
 echo "backup in $DEST ($(du -sh "$DEST" | cut -f1)); checksums in SHA256SUMS"

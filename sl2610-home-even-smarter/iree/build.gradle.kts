@@ -5,7 +5,8 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
 
-val dist = rootProject.layout.projectDirectory.dir("native/iree-torq-runtime/dist")
+// -PireeDist=native/iree-torq-runtime/dist-221 links another runtime build (e.g. the next Torq version) side by side
+val dist = rootProject.layout.projectDirectory.dir(providers.gradleProperty("ireeDist").getOrElse("native/iree-torq-runtime/dist"))
 
 kotlin {
     linuxArm64 {

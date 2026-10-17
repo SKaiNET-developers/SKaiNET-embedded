@@ -3,7 +3,7 @@
 #   dist/include/hes_iree.h          the C API (self-contained, no IREE headers needed)
 #   dist/lib/libhes_iree.a           the shim (hes_iree.c, hes_moonshine.c)
 #   dist/lib/libiree_torq_runtime.a  the Torq-fork IREE runtime: local-sync, local-task, vulkan, torq
-# Usage: build-dist.sh [work-dir]   (default: ./work; built with build-runtime.sh first when missing)
+# Usage: [OUT=<dir>] build-dist.sh [work-dir]   (defaults: ./dist, ./work; built with build-runtime.sh first when missing)
 # Uses the Kotlin/Native bundled clang and sysroot, so the archives match what K/N links for linuxArm64.
 set -euo pipefail
 D=$(cd "$(dirname "$0")" && pwd)
@@ -13,7 +13,7 @@ B="$W/build-a64"
 KONAN_LLVM=$HOME/.konan/dependencies/llvm-21-x86_64-linux-essentials-116
 KONAN_GCC=$HOME/.konan/dependencies/aarch64-unknown-linux-gnu-gcc-8.3.0-glibc-2.25-kernel-4.9-2
 SYSROOT=$KONAN_GCC/aarch64-unknown-linux-gnu/sysroot
-OUT="$D/dist"
+OUT="${OUT:-$D/dist}"
 mkdir -p "$OUT/lib" "$OUT/include" "$W/obj"
 
 # 1) runtime: one fat archive of every runtime/driver archive (not --whole-archive: it holds duplicate objects)

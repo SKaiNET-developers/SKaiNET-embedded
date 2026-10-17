@@ -126,16 +126,28 @@ export BOARD=root@<board-ip>
 scripts/board-audit.sh                      # must end with "OK: board matches the lock"
 scripts/board-canaries.sh                   # 2.0.0 compiler × torq2-stable runtime
 ```
-Record the app numbers as well:
-- the golden set (`hes-tui --wav …`, then `g`)
-- NLU ms/token and ASR time once real engines run
+Record the app numbers as well, from the installed packs (CPU only, both int8):
+```
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-asr-check.kexe ~/.homeevensmarter/cartridges/asr-* \
+  /home/root/hes-wav/golden/g*.wav /home/root/hes-wav/ab_u*.wav /home/root/hes-wav/beckett5s.wav'      # RTF mean
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-nlu-check.kexe ~/.homeevensmarter/cartridges/nlu-*'   # golden 12
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-app-check.kexe --verify \
+  /home/root/hes-wav/golden/g01.wav /home/root/hes-wav/golden/g07.wav /home/root/hes-wav/golden/g10.wav'
+```
+Baseline of 2026-10-17 (Astra v2.4.0, Torq 2.0 driver, app runtime 2.0.0):
+
+| | value |
+|---|---|
+| ASR RTF (16 clips, paced) | 0.73 (0.65–0.85), finals 16/16 as recorded |
+| NLU | 610 ms/token, chunk ~3.8 s, warm-up 78 s, golden 11/12, p50 17.8 s |
+| app (g01/g07/g10) | 25.2 / 24.5 / 16.5 s per command, 3/3 tools, rss-peak 886 MB |
 
 Copy the outputs into the log.
 
 ### 3.2 Backup (mandatory for Path B, recommended for A)
 ```
-scripts/board-backup.sh ~/board-backup/$(date +%Y%m%d)       # vendor models, examples, runtimes, test files (~1.4 GB)
-FULL=1 scripts/board-backup.sh ~/board-backup/full-$(date +%Y%m%d)   # also the regenerable trees (~8.4 GB)
+scripts/board-backup.sh ~/board-backup/$(date +%Y%m%d)       # all of /home except regenerable trees (~3.6 GB)
+FULL=1 scripts/board-backup.sh ~/board-backup/full-$(date +%Y%m%d)   # also the regenerable trees (~13 GB)
 (cd ~/board-backup/<date> && sha256sum -c --quiet SHA256SUMS && echo backup OK)
 ```
 The irreplaceable file is the vendor Moonshine encoder, today's only working NPU encoder:
@@ -158,11 +170,20 @@ Keep `sl2610-iree:v2.0.0` (default build args). It is the rollback compiler.
 
 ### 3.4 App runtime library for Torq 2.2.1
 ```
-TORQ_TAG=v2.2.1 native/iree-torq-runtime/build-runtime.sh ~/work/torq-2.2.1    # IREE fork pin 1c6d87471fa9…
+TORQ_TAG=v2.2.1 native/iree-torq-runtime/build-runtime.sh native/iree-torq-runtime/work-221    # IREE fork pin 1c6d87471fa9…
 ```
 Build into a new work directory and keep the 2.0.0 one (`43014101c8ab…`). Then run the smoke test from
 `native/iree-torq-runtime` against it (`build-smoke.sh`, `run-on-board.sh`). It must list the `torq` driver and pass
-the CPU and NPU adds.
+the CPU and NPU adds. The exec-v0 patch is not applied to 2.2.x: that runtime accepts every executable version up to 2.
+
+Package it next to the 2.0.0 dist and link the app against it with a Gradle property:
+```
+OUT=native/iree-torq-runtime/dist-221 native/iree-torq-runtime/build-dist.sh native/iree-torq-runtime/work-221
+./gradlew -PireeDist=native/iree-torq-runtime/dist-221 :tui:linkAsrCheckReleaseExecutableLinuxArm64 …
+```
+Done on 2026-10-17, on the current board (Torq 2.0 driver): the smoke test passes (CPU and NPU adds), and the app
+linked against 2.2.1 runs today's packs (graphs from the 2.0.0 compiler) unchanged: ASR finals 16/16 identical,
+RTF 0.73; NLU 610–640 ms/token, same answers.
 
 ---
 
@@ -263,11 +284,25 @@ from `astra-usbboot-images/`. To run without sudo, install a udev rule for `06cb
   The app itself does not use either; it links `libiree_torq_runtime.a` built in 3.4.
 
 ### 5.5 Restore our files
-Only what is still needed. The vendor examples and models may now come with the image or from `torq-examples`:
+Only what is still needed. The vendor examples and models may now come with the image or from `torq-examples`.
+The backup holds `/home` as it was (`root/…`, `skainet-tinyllama/…`):
 ```
 cd ~/board-backup/<date>
-tar cf - moon sl2610-examples cmd.wav | ssh $BOARD 'cd /home/root && tar xf -'
+tar cf - root/moon root/sl2610-examples root/cmd.wav root/hes-wav root/hes-bench | ssh $BOARD 'cd /home && tar xf -'
 ```
+
+### 5.6 The app before any rebuild
+The app links its own IREE runtime (2.0.0) and runs on the CPU, so the unchanged binaries and packs should run on
+the new image. That separates "the image broke something" from "the 2.2.1 rebuild broke something":
+```
+BOARD=$BOARD scripts/deploy-tui.sh --no-build          # binary + private lib/libcrypt.so.1
+for b in hes-asr-check hes-nlu-check hes-app-check; do
+  cat tui/build/bin/linuxArm64/*/$b.kexe | ssh $BOARD "cat > /home/root/hes-tui/$b.kexe && chmod +x /home/root/hes-tui/$b.kexe"; done
+scripts/stage-asr-pack.sh && scripts/stage-nlu-pack.sh # if build/packs is gone; then copy both pack dirs to
+                                                       # /home/root/.homeevensmarter/cartridges/<id>/ (tar over ssh)
+```
+Then the three checks of 3.1. Expect the same numbers (CPU clocks may differ with DVFS); a failure to start
+(glibc, libasound, libcrypt) is an image change to note.
 
 ---
 
