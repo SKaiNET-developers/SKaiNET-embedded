@@ -17,6 +17,11 @@ kotlin {
         baseName = "hes-nlu-check"
         entryPoint = "sk.ainet.examples.smarthome.tui.nlucheck.main"
     }
+    // Board check of the real ASR without the UI: hes-asr-check [--fast] <pack-dir> <file.wav>…
+    linuxArm64().binaries.executable("asrCheck") {
+        baseName = "hes-asr-check"
+        entryPoint = "sk.ainet.examples.smarthome.tui.asrcheck.main"
+    }
 
     sourceSets {
         commonMain.dependencies {

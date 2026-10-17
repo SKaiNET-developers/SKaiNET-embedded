@@ -107,6 +107,47 @@ hes_kv_snapshot* hes_kv_snapshot_take(hes_kv* k);
 int hes_kv_restore(hes_kv* k, hes_kv_snapshot* s);
 void hes_kv_snapshot_release(hes_kv_snapshot* s);
 
+/* ---------- Moonshine streaming ASR (moonshine-v2-streaming-v1 contract) ---------- */
+
+typedef struct hes_ms hes_ms;
+
+/* Zero fields take the default (Moonshine v2 tiny / tiny-de). */
+typedef struct {
+  int32_t n_layers;       /* decoder layers: 6 */
+  int32_t head_dim;       /* 40 */
+  int32_t rope_pairs;     /* rotary pairs per head: 16 */
+  int32_t dim;            /* decoder width: 320 (dec_embed.bin must hold at least vocab rows of it) */
+  int32_t enc_dim;        /* frontend/encoder width; 0 = dim */
+  int32_t lag_budget_ms;  /* drop partial decodes once this far behind real time; 0 = 250, negative = never */
+  int32_t fast_finish;    /* 1 = keep the incremental decode as the final instead of re-decoding exactly */
+  int32_t skip_warmup;    /* 1 = no zero-input pass through every graph at create */
+  int32_t verbose;        /* 1 = per-window / per-hop timing lines on stderr */
+} hes_ms_spec;
+
+/*
+ * Five graphs, each on its stage's device (frontend, encoder, adapter; prefill and step share the decoder device),
+ * the decoder parameter archive, the vocabulary table and the decoder embedding rows. Runs one warm-up pass unless
+ * the spec says otherwise. One utterance at a time; not thread-safe.
+ */
+hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
+                      const char* dev_frontend, const char* dev_encoder, const char* dev_adapter, const char* dev_decoder,
+                      const char* vmfb_frontend, const char* vmfb_encoder, const char* vmfb_adapter,
+                      const char* vmfb_prefill, const char* vmfb_step,
+                      const char* irpa, const char* vocab_bin, const char* dec_embed_bin);
+void hes_ms_release(hes_ms* e);
+/* Feeds 16 kHz mono PCM in [-1, 1]. Returns the new cumulative partial, or NULL when it did not change. The string
+ * is valid until the next call on `e`. */
+const char* hes_ms_feed(hes_ms* e, const float* pcm, int32_t n);
+/* End of utterance: the exact final ("" when nothing was recognized), then resets for the next utterance. NULL when
+ * a stage failed and nothing was recognized (see hes_last_error()). Valid until the next call on `e`. */
+const char* hes_ms_finish(hes_ms* e);
+/* Aborts the current utterance. */
+void hes_ms_reset(hes_ms* e);
+/* The last finish()'s counters as comma-separated key=value pairs ("" before the first). */
+const char* hes_ms_stats(hes_ms* e);
+int32_t hes_ms_dim(hes_ms* e);
+int32_t hes_ms_vocab(hes_ms* e);
+
 #ifdef __cplusplus
 }
 #endif

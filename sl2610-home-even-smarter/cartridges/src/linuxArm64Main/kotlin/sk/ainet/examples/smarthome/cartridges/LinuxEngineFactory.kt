@@ -3,6 +3,9 @@ package sk.ainet.examples.smarthome.cartridges
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import sk.ainet.apps.llm.tokenizer.TokenizerFactory
+import sk.ainet.cartridge.asr.moonshine.Language
+import sk.ainet.cartridge.asr.moonshine.StreamingAsrCartridge
+import sk.ainet.cartridge.asr.moonshine.StreamingAsrSession
 import sk.ainet.cartridge.nlu.functiongemma.FilePrefixIdCache
 import sk.ainet.cartridge.nlu.functiongemma.FunctionGemmaEngine
 import sk.ainet.cartridge.nlu.functiongemma.KvBackend
@@ -10,19 +13,25 @@ import sk.ainet.cartridge.nlu.functiongemma.NluResolution
 import sk.ainet.cartridge.nlu.functiongemma.NluTokenizer
 import sk.ainet.cartridge.nlu.functiongemma.ToolCatalog
 import sk.ainet.examples.smarthome.engine.AsrEngine
+import sk.ainet.examples.smarthome.engine.AsrSession
 import sk.ainet.examples.smarthome.engine.NluEngine
 import sk.ainet.examples.smarthome.engine.NluOutcome
 import sk.ainet.examples.smarthome.iree.IreeKv
+import sk.ainet.examples.smarthome.iree.IreeMoonshine
+import sk.ainet.examples.smarthome.iree.MoonshineDevices
+import sk.ainet.examples.smarthome.iree.MoonshineFiles
+import sk.ainet.examples.smarthome.iree.MoonshineSpec
 import sk.ainet.examples.smarthome.iree.IreeRuntime
 import sk.ainet.examples.smarthome.iree.KvSpec
 import sk.ainet.io.gguf.StreamingGGUFReader
 import sk.ainet.io.gguf.createRandomAccessSource
+import sk.ainet.cartridge.asr.moonshine.PackDir as AsrPackDir
 import sk.ainet.cartridge.nlu.functiongemma.PackDir as NluPackDir
 
 /**
  * The board's engines: the blueprint modules' engine code over the in-process IREE runtime (CPU + Torq NPU in one
- * process). Cartridges for the board are materialized for the blueprints' SL26xx targets, compiled by the Torq-fork
- * compiler that matches the runtime linked here.
+ * process): FunctionGemma over the KV session, Moonshine over the streaming session. Cartridges for the board are
+ * materialized for the blueprints' SL26xx targets, compiled by the Torq-fork compiler that matches the runtime linked here.
  */
 object LinuxEngineFactory : EngineFactory {
     override val platform: String = "linux-arm64"
@@ -35,7 +44,20 @@ object LinuxEngineFactory : EngineFactory {
     var cacheDir: Path = Path("/tmp/hes-cache")
 
     override fun asr(cartridge: InstalledCartridge, language: String, device: DevicePreference): AsrEngine =
-        throw UnsupportedOperationException("Moonshine on the board runtime is not wired yet")
+        moonshine(cartridge.dir.toString(), language, device)
+
+    /** The streaming ASR straight from a pack_dir (also used by the board check tool). */
+    fun moonshine(
+        packDir: String, language: String = "en", device: DevicePreference = DevicePreference.AUTO,
+        spec: MoonshineSpec = MoonshineSpec(),
+    ): MoonshineAsrEngine {
+        val pack = AsrPackDir(packDir)
+        val dev = when (device) {
+            DevicePreference.AUTO, DevicePreference.CPU -> "local-task"
+            DevicePreference.GPU -> "vulkan"
+        }
+        return MoonshineAsrEngine(LinuxMoonshineCartridge(pack, language, MoonshineDevices.all(dev), spec))
+    }
 
     override fun nlu(cartridge: InstalledCartridge, device: DevicePreference): NluEngine =
         functionGemma(cartridge.dir.toString(), device)
@@ -67,6 +89,68 @@ object LinuxEngineFactory : EngineFactory {
             log = log,
         )
         return FunctionGemmaNluEngine(engine)
+    }
+}
+
+/**
+ * The blueprint's [StreamingAsrCartridge] contract over the in-process streaming session ([IreeMoonshine]), the
+ * board's counterpart of the blueprint's Android `MoonshineAsrCartridge`. The engine (five graphs + one warm-up pass)
+ * is created on the first [open] and lives until [close].
+ */
+class LinuxMoonshineCartridge(
+    val pack: AsrPackDir,
+    languageTag: String,
+    private val devices: MoonshineDevices,
+    private val spec: MoonshineSpec,
+) : StreamingAsrCartridge {
+    override val id: String = pack.id
+    override val language: String = Language.select(languageTag, pack.languages)
+        ?: throw IllegalArgumentException("pack ${pack.id} holds languages ${pack.languages}, none serves '$languageTag'")
+
+    private var stream: IreeMoonshine? = null
+    private var session: Session? = null
+
+    /** The last utterance's counters (see [IreeMoonshine.stats]); empty before the first final. */
+    val lastStats: Map<String, String> get() = stream?.stats.orEmpty()
+
+    override fun open(): StreamingAsrSession {
+        session?.let { return it }
+        val f = pack.model(language)
+        val s = LinuxEngineFactory.runtime.moonshine(
+            MoonshineFiles(
+                f.frontendVmfb.toString(), f.encoderVmfb.toString(), f.adapterVmfb.toString(), f.prefillVmfb.toString(),
+                f.stepVmfb.toString(), f.paramsIrpa.toString(), f.vocabBin.toString(), f.decEmbedBin.toString(),
+            ),
+            devices, spec,
+        )
+        stream = s
+        return Session(s).also { session = it }
+    }
+
+    override fun close() {
+        session = null
+        stream?.close(); stream = null
+    }
+
+    private class Session(private val s: IreeMoonshine) : StreamingAsrSession {
+        override fun feed(pcm: FloatArray): String? = s.feed(pcm)
+        override fun finish(): String = s.finish()
+        override fun reset() = s.reset()
+        override fun close() = reset()
+    }
+}
+
+/** The app's [AsrEngine] over the cartridge contract. */
+class MoonshineAsrEngine(val cartridge: LinuxMoonshineCartridge) : AsrEngine {
+    override val id: String get() = cartridge.id
+    override val language: String get() = cartridge.language
+    override fun open(): AsrSession = Session(cartridge.open())
+    override fun close() = cartridge.close()
+
+    private class Session(private val s: StreamingAsrSession) : AsrSession {
+        override fun feed(pcm: FloatArray): String? = s.feed(pcm)
+        override fun finish(): String = s.finish()
+        override fun reset() = s.reset()
     }
 }
 

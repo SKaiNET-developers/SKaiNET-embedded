@@ -27,6 +27,8 @@ includeBuild(blueprintsDir) {
     dependencySubstitution {
         substitute(module("sk.ainet.cartridge:nlu-functiongemma-270m-iree"))
             .using(project(":blueprints:nlu-functiongemma-270m-iree"))
+        substitute(module("sk.ainet.cartridge:asr-moonshine-v2-streaming-iree"))
+            .using(project(":blueprints:asr-moonshine-v2-streaming-iree"))
     }
 }
 

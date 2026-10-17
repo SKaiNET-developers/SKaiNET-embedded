@@ -36,6 +36,16 @@ import sk.ainet.examples.smarthome.iree.native.hes_kv_snapshot_take
 import sk.ainet.examples.smarthome.iree.native.hes_kv_spec
 import sk.ainet.examples.smarthome.iree.native.hes_kv_step
 import sk.ainet.examples.smarthome.iree.native.hes_last_error
+import cnames.structs.hes_ms
+import sk.ainet.examples.smarthome.iree.native.hes_ms_create
+import sk.ainet.examples.smarthome.iree.native.hes_ms_dim
+import sk.ainet.examples.smarthome.iree.native.hes_ms_feed
+import sk.ainet.examples.smarthome.iree.native.hes_ms_finish
+import sk.ainet.examples.smarthome.iree.native.hes_ms_release
+import sk.ainet.examples.smarthome.iree.native.hes_ms_reset
+import sk.ainet.examples.smarthome.iree.native.hes_ms_spec
+import sk.ainet.examples.smarthome.iree.native.hes_ms_stats
+import sk.ainet.examples.smarthome.iree.native.hes_ms_vocab
 import cnames.structs.hes_runtime
 import sk.ainet.examples.smarthome.iree.native.hes_runtime_create
 import sk.ainet.examples.smarthome.iree.native.hes_runtime_drivers
@@ -155,6 +165,24 @@ class IreeRuntime(flags: List<String> = DEFAULT_FLAGS) : AutoCloseable {
         IreeKv(k, spec)
     }
 
+    /**
+     * The Moonshine v2 streaming recognizer (see [IreeMoonshine]) over [files], each stage on its device from
+     * [devices]. Creating it runs one warm-up pass through every graph unless [MoonshineSpec.warmUp] is off.
+     */
+    fun moonshine(files: MoonshineFiles, devices: MoonshineDevices, spec: MoonshineSpec = MoonshineSpec()): IreeMoonshine = memScoped {
+        val s = alloc<hes_ms_spec>()
+        s.n_layers = spec.nLayers; s.head_dim = spec.headDim; s.rope_pairs = spec.ropePairs; s.dim = spec.dim
+        s.enc_dim = spec.encDim; s.lag_budget_ms = spec.lagBudgetMs; s.fast_finish = if (spec.fastFinish) 1 else 0
+        s.skip_warmup = if (spec.warmUp) 0 else 1; s.verbose = if (spec.verbose) 1 else 0
+        val m = hes_ms_create(
+            rt, s.ptr,
+            devices.frontend, devices.encoder, devices.adapter, devices.decoder,
+            files.frontend, files.encoder, files.adapter, files.prefill, files.step,
+            files.params, files.vocab, files.decEmbed,
+        ) ?: failure("load")
+        IreeMoonshine(m)
+    }
+
     override fun close() {
         handle?.let { hes_runtime_release(it) }
         handle = null
@@ -265,5 +293,64 @@ class IreeKv internal constructor(private var handle: CPointer<hes_kv>?, val spe
             handle?.let { hes_kv_snapshot_release(it) }
             handle = null
         }
+    }
+}
+
+/** The eight files of one Moonshine v2 streaming model (cartridge pack layout, `artifacts/<role>/<lang>/`). */
+data class MoonshineFiles(
+    val frontend: String, val encoder: String, val adapter: String, val prefill: String, val step: String,
+    val params: String, val vocab: String, val decEmbed: String,
+)
+
+/** The device of each stage; prefill and step share [decoder]. */
+data class MoonshineDevices(val frontend: String, val encoder: String, val adapter: String, val decoder: String) {
+    companion object {
+        fun all(device: String): MoonshineDevices = MoonshineDevices(device, device, device, device)
+    }
+}
+
+/** Geometry and policy; zeros mean the tiny model's defaults. */
+data class MoonshineSpec(
+    val nLayers: Int = 0, val headDim: Int = 0, val ropePairs: Int = 0, val dim: Int = 0, val encDim: Int = 0,
+    /** Partial decodes are dropped once the stream is this far behind real time; 0 = runtime default, < 0 = never. */
+    val lagBudgetMs: Int = 0,
+    val fastFinish: Boolean = false,
+    val warmUp: Boolean = true,
+    val verbose: Boolean = false,
+)
+
+/**
+ * Streaming Moonshine v2: feed 16 kHz mono PCM as it arrives, get cumulative partials, one exact final per
+ * utterance. One utterance at a time; not thread-safe.
+ */
+@OptIn(ExperimentalForeignApi::class)
+class IreeMoonshine internal constructor(private var handle: CPointer<hes_ms>?) : AutoCloseable {
+    private val m: CPointer<hes_ms> get() = handle ?: throw IreeException("moonshine closed")
+
+    /** Decoder width and vocabulary size the model was loaded with. */
+    val dim: Int get() = hes_ms_dim(m)
+    val vocabSize: Int get() = hes_ms_vocab(m)
+
+    /** Returns the new cumulative partial, or `null` when it did not change. */
+    fun feed(pcm: FloatArray): String? {
+        if (pcm.isEmpty()) return null
+        return pcm.usePinned { hes_ms_feed(m, it.addressOf(0), pcm.size) }?.toKString()
+    }
+
+    /** End of utterance: the final transcript ("" when nothing was recognized); resets for the next one. */
+    fun finish(): String = hes_ms_finish(m)?.toKString() ?: failure("moonshine finish")
+
+    fun reset() = hes_ms_reset(m)
+
+    /** The last [finish]'s counters (flushMs, decodeMs, windows, hops, tokens, timeline, ...). */
+    val stats: Map<String, String>
+        get() = hes_ms_stats(m)?.toKString().orEmpty().split(',').mapNotNull { kv ->
+            val i = kv.indexOf('=')
+            if (i <= 0) null else kv.substring(0, i) to kv.substring(i + 1)
+        }.toMap()
+
+    override fun close() {
+        handle?.let { hes_ms_release(it) }
+        handle = null
     }
 }

@@ -1,7 +1,7 @@
 /*
  * hes_iree: see hes_iree.h. Generic sessions plus the KV-cache decoder.
  *
- * The KV part is a port of SKaiNET-transformers' Android session (llm-runtime/iree-android/native/iree_kv_jni.c):
+ * The Moonshine streaming session lives in hes_moonshine.c. The KV part is a port of SKaiNET-transformers' Android session (llm-runtime/iree-android/native/iree_kv_jni.c):
  * same graph contract (functiongemma-kv-v1 / qwen-kv-v1, host-gather embedding), same cache handling, same
  * snapshots. Differences: plain C entry points instead of JNI, errors in a thread-local message, and devices
  * shared through one hes_runtime instead of an instance per session.
@@ -13,7 +13,7 @@
  * Argument order is the tracer's first-use order; sliding layers only ever see their last `window` rows.
  */
 #define _GNU_SOURCE  /* strdup, mmap, sysconf */
-#include "hes_iree.h"
+#include "hes_iree_internal.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -50,7 +50,9 @@ static _Thread_local char g_error[1024];
 
 const char* hes_last_error(void) { return g_error; }
 
-static void set_error(const char* fmt, ...) {
+void hes__clear_error(void) { g_error[0] = 0; }
+
+void hes__set_error(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(g_error, sizeof g_error, fmt, ap);
@@ -58,16 +60,16 @@ static void set_error(const char* fmt, ...) {
 }
 
 /* Records `st` (consumed) under `what`; returns 0 when ok, -1 otherwise. */
-static int check(iree_status_t st, const char* what) {
+int hes__check(iree_status_t st, const char* what) {
   if (iree_status_is_ok(st)) return 0;
   char* buf = NULL;
   iree_host_size_t len = 0;
   iree_allocator_t alloc = iree_allocator_system();
   if (iree_status_to_string(st, &alloc, &buf, &len) && buf) {
-    set_error("%s: %.*s", what, (int)(len < 900 ? len : 900), buf);
+    hes__set_error("%s: %.*s", what, (int)(len < 900 ? len : 900), buf);
     iree_allocator_free(alloc, buf);
   } else {
-    set_error("%s: status code %d", what, (int)iree_status_code(st));
+    hes__set_error("%s: status code %d", what, (int)iree_status_code(st));
   }
   iree_status_ignore(st);
   return -1;
@@ -97,14 +99,14 @@ hes_runtime* hes_runtime_create(const char* const* flags, int flag_count) {
     iree_status_t st = iree_flags_parse(IREE_FLAGS_PARSE_MODE_DEFAULT, &argc, &parse_argv);
     /* argv itself (the pointer array) may go; the strings it pointed to stay alive. */
     free(argv);
-    if (check(st, "flags")) return NULL;
+    if (hes__check(st, "flags")) return NULL;
     g_flags_parsed = 1;
   }
   hes_runtime* rt = calloc(1, sizeof *rt);
   iree_runtime_instance_options_t options;
   iree_runtime_instance_options_initialize(&options);
   iree_runtime_instance_options_use_all_available_drivers(&options);
-  if (check(iree_runtime_instance_create(&options, iree_allocator_system(), &rt->instance), "instance")) {
+  if (hes__check(iree_runtime_instance_create(&options, iree_allocator_system(), &rt->instance), "instance")) {
     free(rt);
     return NULL;
   }
@@ -136,14 +138,14 @@ void hes_runtime_release(hes_runtime* rt) {
 }
 
 /* The shared device for `uri`, created on first use. Borrowed: the runtime owns it. */
-static iree_hal_device_t* device_for(hes_runtime* rt, const char* uri) {
+iree_hal_device_t* hes__device_for(hes_runtime* rt, const char* uri) {
   for (int i = 0; i < rt->device_count; ++i)
     if (strcmp(rt->devices[i].uri, uri) == 0) return rt->devices[i].device;
-  if (rt->device_count == MAX_DEVICES) { set_error("device %s: too many devices", uri); return NULL; }
+  if (rt->device_count == MAX_DEVICES) { hes__set_error("device %s: too many devices", uri); return NULL; }
   iree_hal_device_t* device = NULL;
   char what[128];
   snprintf(what, sizeof what, "device %s", uri);
-  if (check(iree_runtime_instance_try_create_default_device(rt->instance, iree_make_cstring_view(uri), &device), what))
+  if (hes__check(iree_runtime_instance_try_create_default_device(rt->instance, iree_make_cstring_view(uri), &device), what))
     return NULL;
   rt->devices[rt->device_count].uri = strdup(uri);
   rt->devices[rt->device_count].device = device;
@@ -152,12 +154,6 @@ static iree_hal_device_t* device_for(hes_runtime* rt, const char* uri) {
 }
 
 /* ---------- sessions ---------- */
-
-struct hes_session {
-  iree_runtime_session_t* session;
-  iree_io_parameter_provider_t* provider;
-  iree_hal_device_t* device;  /* borrowed from the runtime */
-};
 
 static void unmap_file(void* user_data, iree_io_file_handle_primitive_t primitive) {
   (void)user_data;
@@ -169,7 +165,7 @@ static void unmap_file(void* user_data, iree_io_file_handle_primitive_t primitiv
  * are imported by the CPU device without a copy, so the weights stay clean, evictable page cache instead of
  * anonymous heap: a 0.5 GB archive per graph would otherwise exhaust a 2 GB board.
  */
-static iree_status_t open_mapped(const char* path, iree_io_file_handle_t** out) {
+iree_status_t hes__open_mapped(const char* path, iree_io_file_handle_t** out) {
   int fd = open(path, O_RDONLY);
   if (fd < 0) return iree_make_status(IREE_STATUS_NOT_FOUND, "cannot open %s", path);
   off_t size = lseek(fd, 0, SEEK_END);
@@ -187,7 +183,7 @@ static iree_status_t open_mapped(const char* path, iree_io_file_handle_t** out) 
  * New IREE session on `device`; with `irpa` its parameters are appended first (scope `scope`). On success
  * `*out_index` (when not NULL) receives the parameter index, retained, for callers that read the archive.
  */
-static iree_status_t open_session(hes_runtime* rt, iree_hal_device_t* device, const char* vmfb, const char* irpa,
+iree_status_t hes__open_session(hes_runtime* rt, iree_hal_device_t* device, const char* vmfb, const char* irpa,
                                   const char* scope, hes_session* s, iree_io_parameter_index_t** out_index) {
   iree_allocator_t alloc = iree_allocator_system();
   s->device = device;
@@ -197,7 +193,7 @@ static iree_status_t open_session(hes_runtime* rt, iree_hal_device_t* device, co
       rt->instance, &options, device, iree_runtime_instance_host_allocator(rt->instance), &s->session));
   if (irpa) {
     iree_io_file_handle_t* file = NULL;
-    IREE_RETURN_IF_ERROR(open_mapped(irpa, &file));
+    IREE_RETURN_IF_ERROR(hes__open_mapped(irpa, &file));
     iree_io_parameter_index_t* index = NULL;
     iree_status_t st = iree_io_parameter_index_create(alloc, &index);
     if (iree_status_is_ok(st)) st = iree_io_parse_irpa_index(file, index, alloc);
@@ -217,7 +213,7 @@ static iree_status_t open_session(hes_runtime* rt, iree_hal_device_t* device, co
   return iree_runtime_session_append_bytecode_module_from_file(s->session, vmfb);
 }
 
-static void close_session(hes_session* s) {
+void hes__close_session(hes_session* s) {
   if (s->session) iree_runtime_session_release(s->session);
   if (s->provider) iree_io_parameter_provider_release(s->provider);
   memset(s, 0, sizeof *s);
@@ -225,13 +221,13 @@ static void close_session(hes_session* s) {
 
 hes_session* hes_session_create(hes_runtime* rt, const char* device, const char* vmfb, const char* irpa, const char* scope) {
   g_error[0] = 0;
-  iree_hal_device_t* dev = device_for(rt, device);
+  iree_hal_device_t* dev = hes__device_for(rt, device);
   if (!dev) return NULL;
   hes_session* s = calloc(1, sizeof *s);
   char what[512];
   snprintf(what, sizeof what, "session %s on %s", vmfb, device);
-  if (check(open_session(rt, dev, vmfb, irpa, scope, s, NULL), what)) {
-    close_session(s);
+  if (hes__check(hes__open_session(rt, dev, vmfb, irpa, scope, s, NULL), what)) {
+    hes__close_session(s);
     free(s);
     return NULL;
   }
@@ -240,7 +236,7 @@ hes_session* hes_session_create(hes_runtime* rt, const char* device, const char*
 
 void hes_session_release(hes_session* s) {
   if (!s) return;
-  close_session(s);
+  hes__close_session(s);
   free(s);
 }
 
@@ -249,7 +245,7 @@ void hes_session_release(hes_session* s) {
 /* hes_view is IREE's buffer view; the alias keeps the header free of IREE types. */
 #define VIEW(v) ((iree_hal_buffer_view_t*)(v))
 
-static iree_hal_buffer_params_t device_params(void) {
+iree_hal_buffer_params_t hes__device_params(void) {
   iree_hal_buffer_params_t params = {0};
   params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
   params.access = IREE_HAL_MEMORY_ACCESS_ALL;
@@ -257,31 +253,31 @@ static iree_hal_buffer_params_t device_params(void) {
   return params;
 }
 
-static iree_status_t view_copy(iree_hal_device_t* device, iree_hal_element_type_t type, int rank,
+iree_status_t hes__view_copy(iree_hal_device_t* device, iree_hal_element_type_t type, int rank,
                                const iree_hal_dim_t* dims, const void* data, size_t bytes, iree_hal_buffer_view_t** out) {
   return iree_hal_buffer_view_allocate_buffer_copy(device, iree_hal_device_allocator(device), (iree_host_size_t)rank,
-                                                    dims, type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, device_params(),
+                                                    dims, type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, hes__device_params(),
                                                     iree_make_const_byte_span(data, bytes), out);
 }
 
 hes_view* hes_view_from_host(hes_session* s, int32_t element_type, int rank, const int64_t* dims, const void* data, size_t bytes) {
   g_error[0] = 0;
-  if (rank < 0 || rank > 8) { set_error("view: rank %d out of range", rank); return NULL; }
+  if (rank < 0 || rank > 8) { hes__set_error("view: rank %d out of range", rank); return NULL; }
   iree_hal_dim_t d[8];
   size_t count = 1;
   for (int i = 0; i < rank; ++i) { d[i] = (iree_hal_dim_t)dims[i]; count *= (size_t)dims[i]; }
   size_t want = count * iree_hal_element_dense_byte_count((iree_hal_element_type_t)element_type);
-  if (want != bytes) { set_error("view: %zu bytes given, shape needs %zu", bytes, want); return NULL; }
+  if (want != bytes) { hes__set_error("view: %zu bytes given, shape needs %zu", bytes, want); return NULL; }
   iree_hal_buffer_view_t* v = NULL;
-  if (check(view_copy(s->device, (iree_hal_element_type_t)element_type, rank, d, data, bytes, &v), "view")) return NULL;
+  if (hes__check(hes__view_copy(s->device, (iree_hal_element_type_t)element_type, rank, d, data, bytes, &v), "view")) return NULL;
   return (hes_view*)v;
 }
 
 int hes_view_to_host(hes_session* s, hes_view* v, void* dst, size_t bytes) {
   g_error[0] = 0;
   size_t have = (size_t)iree_hal_buffer_view_byte_length(VIEW(v));
-  if (have != bytes) { set_error("to_host: view has %zu bytes, %zu requested", have, bytes); return -1; }
-  return check(iree_hal_device_transfer_d2h(s->device, iree_hal_buffer_view_buffer(VIEW(v)), 0, dst, bytes,
+  if (have != bytes) { hes__set_error("to_host: view has %zu bytes, %zu requested", have, bytes); return -1; }
+  return hes__check(iree_hal_device_transfer_d2h(s->device, iree_hal_buffer_view_buffer(VIEW(v)), 0, dst, bytes,
                                             IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()), "to_host");
 }
 
@@ -320,7 +316,7 @@ int hes_call(hes_session* s, const char* function, hes_view* const* inputs, int 
   int n = 0;
   char what[256];
   snprintf(what, sizeof what, "call %s", function);
-  if (check(invoke(s->session, function, (iree_hal_buffer_view_t* const*)inputs, input_count,
+  if (hes__check(invoke(s->session, function, (iree_hal_buffer_view_t* const*)inputs, input_count,
                    (iree_hal_buffer_view_t**)outputs, output_capacity, &n), what))
     return -1;
   return n;
@@ -356,7 +352,7 @@ struct hes_kv_snapshot {
 
 static void graph_close(Graph* g) {
   if (g->alias) { if (g->s.session) iree_runtime_session_release(g->s.session); memset(&g->s, 0, sizeof g->s); }
-  else close_session(&g->s);
+  else hes__close_session(&g->s);
   free(g->fn);
   memset(g, 0, sizeof *g);
 }
@@ -408,12 +404,12 @@ static void embed_rows(const hes_kv* k, const int32_t* toks, int n, int rows, fl
 static iree_status_t view_f32(hes_kv* k, const float* data, int rank, const iree_hal_dim_t* dims, iree_hal_buffer_view_t** out) {
   size_t count = 1;
   for (int i = 0; i < rank; ++i) count *= (size_t)dims[i];
-  return view_copy(k->dev, IREE_HAL_ELEMENT_TYPE_FLOAT_32, rank, dims, data, count * 4, out);
+  return hes__view_copy(k->dev, IREE_HAL_ELEMENT_TYPE_FLOAT_32, rank, dims, data, count * 4, out);
 }
 static iree_status_t view_i32(hes_kv* k, const int32_t* data, int rank, const iree_hal_dim_t* dims, iree_hal_buffer_view_t** out) {
   size_t count = 1;
   for (int i = 0; i < rank; ++i) count *= (size_t)dims[i];
-  return view_copy(k->dev, IREE_HAL_ELEMENT_TYPE_INT_32, rank, dims, data, count * 4, out);
+  return hes__view_copy(k->dev, IREE_HAL_ELEMENT_TYPE_INT_32, rank, dims, data, count * 4, out);
 }
 
 /* [1, nKV, rows, headDim] view over rows [rowStart, rowStart+rows): a zero-copy subspan for nKV == 1, a gather otherwise. */
@@ -433,7 +429,7 @@ static iree_status_t sub_rows(hes_kv* k, iree_hal_buffer_view_t* v, int rowStart
   iree_device_size_t planeBytes = (iree_device_size_t)k->headDim * 4;
   iree_device_size_t rowBytesOut = (iree_device_size_t)rows * planeBytes;
   iree_hal_buffer_t* dst = NULL;
-  IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(iree_hal_device_allocator(k->dev), device_params(),
+  IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(iree_hal_device_allocator(k->dev), hes__device_params(),
                                                           (iree_device_size_t)k->nKV * rowBytesOut, &dst));
   iree_hal_buffer_t* src = iree_hal_buffer_view_buffer(v);
   iree_status_t st = iree_ok_status();
@@ -549,12 +545,12 @@ hes_kv* hes_kv_create(hes_runtime* rt, const char* device, const hes_kv_spec* sp
   if (spec->n_layers <= 0 || spec->head_dim <= 0 || spec->n_kv_heads <= 0 || spec->n_heads <= 0 ||
       spec->n_heads % spec->n_kv_heads != 0 || spec->hidden_size <= 0 || spec->vocab_size <= 0 ||
       spec->global_layer_period <= 0 || spec->chunk <= 0 || spec->head_dim > 1024) {
-    set_error("kv: bad spec (sizes > 0, n_heads a multiple of n_kv_heads, head_dim <= 1024)");
+    hes__set_error("kv: bad spec (sizes > 0, n_heads a multiple of n_kv_heads, head_dim <= 1024)");
     return NULL;
   }
   int maskH = spec->mask_heads <= 0 ? spec->n_heads : spec->mask_heads;
-  if (maskH != 1 && maskH != spec->n_heads) { set_error("kv: bad spec (mask_heads must be 0, 1 or n_heads)"); return NULL; }
-  iree_hal_device_t* dev = device_for(rt, device);
+  if (maskH != 1 && maskH != spec->n_heads) { hes__set_error("kv: bad spec (mask_heads must be 0, 1 or n_heads)"); return NULL; }
+  iree_hal_device_t* dev = hes__device_for(rt, device);
   if (!dev) return NULL;
 
   hes_kv* k = calloc(1, sizeof *k);
@@ -568,7 +564,7 @@ hes_kv* hes_kv_create(hes_runtime* rt, const char* device, const hes_kv_spec* sp
 
   int shared = vPF && iPF && strcmp(vWP, vCH) == 0 && strcmp(iWP, iCH) == 0 && strcmp(vWP, vPF) == 0 && strcmp(iWP, iPF) == 0;
   iree_io_parameter_index_t* wpIndex = NULL;
-  iree_status_t st = open_session(rt, dev, vWP, iWP, DEFAULT_SCOPE, &k->withPast.s, &wpIndex);
+  iree_status_t st = hes__open_session(rt, dev, vWP, iWP, DEFAULT_SCOPE, &k->withPast.s, &wpIndex);
   if (iree_status_is_ok(st)) k->withPast.fn = strdup(fWP);
   if (iree_status_is_ok(st) && !locate_embedding(k, iWP, wpIndex))
     st = iree_make_status(IREE_STATUS_NOT_FOUND, "no vocab x hidden bf16 embedding entry in the with-past archive");
@@ -576,13 +572,13 @@ hes_kv* hes_kv_create(hes_runtime* rt, const char* device, const hes_kv_spec* sp
   if (shared) {
     if (iree_status_is_ok(st)) { graph_alias(&k->chunk, &k->withPast, fCH); graph_alias(&k->prefill, &k->withPast, fPF); k->hasPrefill = 1; }
   } else {
-    if (iree_status_is_ok(st)) { st = open_session(rt, dev, vCH, iCH, DEFAULT_SCOPE, &k->chunk.s, NULL); if (iree_status_is_ok(st)) k->chunk.fn = strdup(fCH); }
+    if (iree_status_is_ok(st)) { st = hes__open_session(rt, dev, vCH, iCH, DEFAULT_SCOPE, &k->chunk.s, NULL); if (iree_status_is_ok(st)) k->chunk.fn = strdup(fCH); }
     if (iree_status_is_ok(st) && vPF && iPF) {
-      st = open_session(rt, dev, vPF, iPF, DEFAULT_SCOPE, &k->prefill.s, NULL);
+      st = hes__open_session(rt, dev, vPF, iPF, DEFAULT_SCOPE, &k->prefill.s, NULL);
       if (iree_status_is_ok(st)) { k->prefill.fn = strdup(fPF); k->hasPrefill = 1; }
     }
   }
-  if (check(st, "kv create")) { hes_kv_release(k); return NULL; }
+  if (hes__check(st, "kv create")) { hes_kv_release(k); return NULL; }
   return k;
 }
 
@@ -596,8 +592,8 @@ int32_t hes_kv_position(hes_kv* k) { return k ? k->pos : -1; }
 
 int32_t hes_kv_prefill(hes_kv* k, const int32_t* toks, int32_t seq, int32_t n) {
   g_error[0] = 0;
-  if (!k->hasPrefill) { set_error("prefill: no prefill graph in this session (or already released)"); return -1; }
-  if (n <= 0 || n > seq) { set_error("prefill: n out of range"); return -1; }
+  if (!k->hasPrefill) { hes__set_error("prefill: no prefill graph in this session (or already released)"); return -1; }
+  if (n <= 0 || n > seq) { hes__set_error("prefill: n out of range"); return -1; }
   float* emb = malloc((size_t)seq * k->hidden * 4);
   embed_rows(k, toks, n, seq, emb);
   float* sel = calloc((size_t)seq, 4);
@@ -620,14 +616,14 @@ int32_t hes_kv_prefill(hes_kv* k, const int32_t* toks, int32_t seq, int32_t n) {
     k->pos = n;
   }
   release_views(ins, 3); release_views(outs, nOut); free(outs); free(emb); free(sel);
-  return check(st, "prefill") ? -1 : tok;
+  return hes__check(st, "prefill") ? -1 : tok;
 }
 
 int32_t hes_kv_chunk(hes_kv* k, const int32_t* tokensIn, int32_t n) {
   g_error[0] = 0;
   int C = k->chunkC;
-  if (n <= 0 || n > C) { set_error("chunk: n must be in 1..%d", C); return -1; }
-  if (k->len[0] == 0) { set_error("chunk: empty cache, prefill first"); return -1; }
+  if (n <= 0 || n > C) { hes__set_error("chunk: n must be in 1..%d", C); return -1; }
+  if (k->len[0] == 0) { hes__set_error("chunk: empty cache, prefill first"); return -1; }
   int hasSliding = k->period > 1;
   int32_t* toks = calloc((size_t)C, 4);
   memcpy(toks, tokensIn, (size_t)n * 4);
@@ -701,12 +697,12 @@ int32_t hes_kv_chunk(hes_kv* k, const int32_t* tokensIn, int32_t n) {
   release_views(cK, k->nLayers); release_views(cV, k->nLayers); release_views(outs, nOut);
   free(ins); free(outs); free(cK); free(cV); free(toks); free(emb);
   free(cosS); free(sinS); free(cosG); free(sinG); free(sel); free(maskS); free(maskG);
-  return check(st, "chunk") ? -1 : tok;
+  return hes__check(st, "chunk") ? -1 : tok;
 }
 
 int32_t hes_kv_step(hes_kv* k, int32_t token) {
   g_error[0] = 0;
-  if (k->len[0] == 0) { set_error("step: empty cache, prefill first"); return -1; }
+  if (k->len[0] == 0) { hes__set_error("step: empty cache, prefill first"); return -1; }
   int hd = k->headDim;
   int32_t t = token;
   float* emb = malloc((size_t)k->hidden * 4);
@@ -760,7 +756,7 @@ int32_t hes_kv_step(hes_kv* k, int32_t token) {
   release_views(owned, 4);
   release_views(cK, k->nLayers); release_views(cV, k->nLayers); release_views(outs, nOut);
   free(ins); free(outs); free(cK); free(cV); free(emb);
-  return check(st, "step") ? -1 : tok;
+  return hes__check(st, "step") ? -1 : tok;
 }
 
 hes_kv_snapshot* hes_kv_snapshot_take(hes_kv* k) {
@@ -776,7 +772,7 @@ hes_kv_snapshot* hes_kv_snapshot_take(hes_kv* k) {
 
 int hes_kv_restore(hes_kv* k, hes_kv_snapshot* s) {
   g_error[0] = 0;
-  if (s->n != 2 * k->nLayers) { set_error("restore: snapshot from another session"); return -1; }
+  if (s->n != 2 * k->nLayers) { hes__set_error("restore: snapshot from another session"); return -1; }
   for (int i = 0; i < s->n; ++i) {
     if (s->kv[i]) iree_hal_buffer_view_retain(s->kv[i]);
     if (k->kv[i]) iree_hal_buffer_view_release(k->kv[i]);

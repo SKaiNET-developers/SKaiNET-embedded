@@ -32,6 +32,7 @@ transformers-bom = { module = "sk.ainet.transformers:skainet-transformers-bom", 
 transformers-core = { module = "sk.ainet.transformers:skainet-transformers-core" }
 skainet-io-gguf = { module = "sk.ainet.core:skainet-io-gguf", version.ref = "skainet" }
 cartridge-nlu-functiongemma = { module = "sk.ainet.cartridge:nlu-functiongemma-270m-iree", version = "0.1.0" }
+cartridge-asr-moonshine = { module = "sk.ainet.cartridge:asr-moonshine-v2-streaming-iree", version = "0.1.0" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }

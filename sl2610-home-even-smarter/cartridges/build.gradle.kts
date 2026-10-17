@@ -30,6 +30,7 @@ kotlin {
         linuxArm64Main.dependencies {
             implementation(project(":iree"))
             implementation(libs.cartridge.nlu.functiongemma)       // FunctionGemmaEngine, KvBackend, PackDir (included build)
+            implementation(libs.cartridge.asr.moonshine)           // StreamingAsrCartridge, PackDir, Language (included build)
             implementation(project.dependencies.platform(libs.transformers.bom))
             implementation(libs.transformers.core)                 // TokenizerFactory
             implementation(libs.skainet.io.gguf)                   // StreamingGGUFReader, createRandomAccessSource (pread)

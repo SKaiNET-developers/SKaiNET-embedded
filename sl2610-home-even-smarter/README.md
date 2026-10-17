@@ -29,7 +29,7 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 | TUI app (`:tui`) on fake engines, host + board | works |
 | Native IREE runtime, CPU + NPU in one process, from Kotlin (`:iree`, `iree-smoke`) | works on the board |
 | FunctionGemma NLU on the board (in-process, A55) | works: golden set 11/12 via `hes-nlu-check` (12/12 with the app's host rule), ~830 ms/token, RSS 1.3 GB |
-| Moonshine ASR on the board | graphs compiled for `cpu-sl26xx`; runtime binding (streaming session) next |
+| Moonshine ASR on the board (in-process, A55) | works: streaming partials in real time, finals match the reference model on the test clips via `hes-asr-check`; final 2.3–2.7 s after the last sample, RSS 255 MB |
 | Torq target for the Moonshine blueprint | blocked on NPU multi-dispatch zeros; see the board update |
 | Middleware client | pending protocol |
 | Board / Torq update 2.0 → 2.2 | procedure ready: [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md) |
@@ -68,9 +68,11 @@ set, `r` reset the home, `f` fakes on/off, `tab` cartridges (`i` fetch index, `d
 Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --server http://<host-ip>:8080`.
 
 Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skainet/iree-compiler-torq`, profiles in
-`cartridges/profiles/`). Until the signed pack for that target exists, `scripts/stage-nlu-pack.sh` assembles an
-unsigned development pack from the recipe outputs; check it on the board with
-`hes-nlu-check <pack-dir>` (golden set, timings, peak memory).
+`cartridges/profiles/`). Until the signed packs for that target exist, `scripts/stage-nlu-pack.sh` and
+`scripts/stage-asr-pack.sh` assemble unsigned development packs from the recipe outputs; check them on the board with
+`hes-nlu-check <pack-dir>` (golden set, timings, peak memory) and
+`hes-asr-check [--fast] [--verbose] <pack-dir> <file.wav>…` (16 kHz mono WAVs streamed like a microphone: partials,
+final, latency after the last sample, per-window stage costs).
 
 ## Board
 
