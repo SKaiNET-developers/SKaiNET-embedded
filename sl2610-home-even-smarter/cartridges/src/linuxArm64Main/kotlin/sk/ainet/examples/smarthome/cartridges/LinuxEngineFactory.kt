@@ -24,7 +24,7 @@ import sk.ainet.examples.smarthome.iree.MoonshineSpec
 import sk.ainet.examples.smarthome.iree.IreeRuntime
 import sk.ainet.examples.smarthome.iree.KvSpec
 import sk.ainet.io.gguf.StreamingGGUFReader
-import sk.ainet.io.gguf.createRandomAccessSource
+import sk.ainet.io.openRandomAccessSource
 import sk.ainet.cartridge.asr.moonshine.PackDir as AsrPackDir
 import sk.ainet.cartridge.nlu.functiongemma.PackDir as NluPackDir
 
@@ -167,7 +167,7 @@ class IreeKvBackend(private val kv: IreeKv) : KvBackend {
 /** The GGUF tokenizer (SKaiNET-transformers), read with pread on the board. */
 object GgufTokenizer {
     fun open(path: String): NluTokenizer {
-        val source = createRandomAccessSource(path) ?: throw IllegalStateException("cannot open $path")
+        val source = openRandomAccessSource(path) ?: throw IllegalStateException("cannot open $path")
         val fields = StreamingGGUFReader.open(source).use { it.fields }
         val tokenizer = TokenizerFactory.fromGgufFields(fields)
         return object : NluTokenizer {
