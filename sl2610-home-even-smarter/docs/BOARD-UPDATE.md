@@ -1,385 +1,350 @@
-# Board, Torq tools and NPU update: step-by-step instructions
+# Board update: flash Astra SDK v2.6.0 (Torq 2.2)
 
-How to move the SL2619 board and the host tools from **Astra SDK v2.4.0 + Torq 2.0.0** to **Astra SDK v2.6.0 +
-Torq 2.2.x**. The guide covers downloads, the flashing tool, the image, the NPU module, the host compiler, the
-verification gate and the rollback.
+One path, in order. Every step has a **Check**. Do not start the next step until the check passes. If a check
+fails, follow its **If not** line, or stop and go to [Rollback](#rollback).
 
-Every download is pinned to the sha256 published with its GitHub release. [`board/board.lock`](../board/board.lock)
-records the set the app is verified against.
+Steps marked **[at the board]** need someone at the board, with a USB-C cable and the buttons. All other steps run
+on the host and can be done remotely.
 
----
-
-## 0. Background
-
-### Why the versions move together
-
-The board image, the Torq NPU kernel module (`syna_npu.ko`), the Torq runtime on the board and the Torq compiler on
-the host are versioned **as one set**. Synaptics releases one Torq framework per Astra SDK. A model compiled by one
-Torq version and run on another either fails to load (`version N does not match expected version M`) or, worse,
-loads and returns zeros.
-
-| Astra SDK (board image) | Released | Kernel | Torq in the image | Matching Torq framework |
-|---|---|---|---|---|
-| scarthgap_6.12_v2.4.0 | 2026-05-30 | 6.12.62 | 2.0.0 | 2.0.x, **current board** |
-| scarthgap_6.12_v2.5.0 | 2026-07-31 | 6.12.62 | 2.1.x | 2.1.x |
-| scarthgap_6.12_v2.6.0 | 2026-09-30 | 6.12.62 | **2.2.0** | 2.2.x, **target** |
-| scarthgap_6.12_v2.6.1 | 2026-10-13 | 6.12.62 | 2.2.x | sl2619 *coralboard* variants only, no plain `sl2619` (RDK) image |
-
-### Why update
-
-Our blocker is NPU graphs with three or more chained dispatches returning zeros or nothing. That is the self-compiled
-Moonshine encoder, and canaries `chain8_64` / `softmax_64`. Torq 2.1/2.2 bring:
-- a fix for "runtime auto mode returning zeros or SIGSEGV"
-- tile-and-fuse improvements and LayerNorm on the NSS
-- `torq-decode-llm`, an LLM decode driver on the NPU
-- NPU devfreq (800 MHz → 1 GHz)
-- a prebuilt `syna_npu.ko` in every release
-
-Astra v2.6.0 additionally brings NPU DVFS, eMMC tuning and newer firmware.
-
-### What was measured on 2026-10-16 (current board, Torq 2.0 driver)
-
-| Compiler × runtime | identity_1x4 | chain2_64 | chain8_64 | softmax_64 |
-|---|---|---|---|---|
-| 2.0.0 × torq2-stable 2.0.0 | PASS | PASS | no output | wrong values (mean 64) |
-| 2.2.1 × 2.2.1 `astra-sl-torq-run-module` | PASS | PASS | no output | no output |
-
-The new runtime alone does not fix it on the **old driver**. The open question is the 2.2 driver, which needs
-Path A or Path B below.
-
-### Two paths
-
-| | Path A: module trial on the current image | Path B: full flash to Astra v2.6.0 |
-|---|---|---|
-| What changes | `syna_npu.ko` loaded by hand from Torq 2.2.1 (same vermagic `6.12.62`); nothing written to `/` | entire eMMC: boot chain, kernel, rootfs, **`/home`** |
-| Reversible by | reboot (the old module loads again) | flashing v2.4.0 back + restoring the backup |
-| Physical access | only if the kernel hangs (power cycle) | **yes** (USB-C cable, USB_BOOT and RESET buttons) |
-| Answers | does the 2.2 driver + 2.2.1 runtime fix multi-dispatch? | everything, plus devfreq, DVFS, GPU stack, new kernel modules |
-
-Recommendation: do Path A first. It is cheap and answers the main question. Do Path B when someone is at the board,
-whatever Path A shows, because it also moves the image to what Synaptics tests the 2.2 runtime with.
+What changes: the whole eMMC (boot chain, kernel, root filesystem and **`/home`**), from Astra v2.4.0 + Torq 2.0.0
+to Astra v2.6.0 + Torq 2.2. Why and what was measured before: see [Appendix A](#appendix-a-background).
 
 ---
 
-## 1. What you need
+## Setup (every terminal you use)
 
-**Host:** Linux x86_64 with:
-- `curl`, `sha256sum`, `unzip`, `git` and **`git-lfs`** (`sudo apt install git-lfs`)
-- `docker`
-- `python3` with `numpy` and `ml_dtypes`, for the canary checks
-- `sudo`, because `astra-update` needs USB access
-- About **3 GB** free: both images zipped are about 1.4 GB, the unpacked eMMC image about 1.5 GB
-
-**Board side (Path B):**
-- a **USB-C cable** for the USB 2.0 Type-C port next to the Ethernet port, data-capable
-- the board's power supply
-- network cable
-- physical access to the **SW7 USB_BOOT** and **SW6 RESET** buttons on the I/O board
-- the `SD_BOOT` jumper **not** fitted, so the board boots from eMMC
-- optional but recommended: a 3.3 V USB-to-serial adapter on UART0 of the 40-pin header, 115200 8N1. See
-  "Connecting to an external USB-to-serial adapter" in the Astra documentation.
-
-**Accounts:** none. Everything is public on GitHub.
+```
+export BOARD=root@192.168.3.26                                   # changes after the flash (step 9)
+export HES=~/projects/neuroSKai/project/HES
+export UPD=$HES/board-update                                     # downloads + flashing tool
+export BAK=$HES/board-backup/20261017-preflash                   # backup of /home
+export APP=$HES/SKaiNET-embedded/sl2610-home-even-smarter        # this repo
+cd $APP
+```
 
 ---
 
-## 2. Downloads
+## Part 1: before going to the board (host)
 
-All in one step, verified against the published sha256:
+The preparation was done on 2026-10-17. Each step below only checks that it is still in place.
+
+### Step 1. Image and rollback image are downloaded
 
 ```
-scripts/board-update-download.sh ~/board-update all          # or pick sets: image rollback torq usb-tool
+echo "9b15b709a45b0e4b5d6c1532277e2465aee960f862961805150e220fb7ac665f  $UPD/sl2619_scarthgap_6.12_v2.6.0.zip" | sha256sum -c
+echo "7011b4fb6f4808834d80ff5f9096f6e596c87f68ee28c59cf6807cb082561de9  $UPD/sl2619_scarthgap_6.12_v2.4.0.zip" | sha256sum -c
 ```
+**Check:** both lines end with `OK`.
+**If not:** `scripts/board-update-download.sh $UPD image rollback`, then repeat.
 
-| Set | File | Source | Size | sha256 |
-|---|---|---|---|---|
-| image | `sl2619_scarthgap_6.12_v2.6.0.zip` | [Astra SDK v2.6.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.6.0) | 725 MB | `9b15b709a45b0e4b5d6c1532277e2465aee960f862961805150e220fb7ac665f` |
-| rollback | `sl2619_scarthgap_6.12_v2.4.0.zip` | [Astra SDK v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0) | 705 MB | `7011b4fb6f4808834d80ff5f9096f6e596c87f68ee28c59cf6807cb082561de9` |
-| torq | `astra-release.tar.gz` (`lib/syna_npu.ko`, `tools/astra-sl-torq-run-module`) | [Torq v2.2.1](https://github.com/synaptics-torq/torq-compiler/releases/tag/v2.2.1) | 0.6 MB | `f71693087ec336674366e254197fb622fb939e353dfd34c745e766c1edfdf433` |
-| torq | `torq_runtime-2.2.1-cp312-cp312-manylinux_2_39_aarch64.whl` | Torq v2.2.1 | 4.3 MB | `7c17c5c627670314119f3a868f0fa6a877f718ab30efbfe8ac2088b3fe93de4e` |
-| torq | `torq_compiler-2.2.1-cp312-cp312-manylinux_2_39_x86_64.whl` | Torq v2.2.1 | 87 MB | `37b8d56f6e148db0dda229b7b231cc6ad06ab699639d9cc3ac459cb9680da259` |
-| torq | `user_manual.zip` | Torq v2.2.1 | 3.3 MB | `b08b6034559ba413915f1626828b1fb5d41a8355866e119368019d16365c453c` |
-| usb-tool | [`synaptics-astra/usb-tool`](https://github.com/synaptics-astra/usb-tool) @ `91d4000af92f`: `astra-update` v2.0.4 (`bin/linux/x86_64/astra-update`) + USB boot images (`astra-usbboot-images/sl2619`) | Git LFS | 3.4 MB tool | pinned commit |
+### Step 2. The flashing tool holds the v2.6.0 image
 
-Not needed: the Yocto SDK toolchains (`*-toolchain-5.0.9.sh*`). The app is built with the Kotlin/Native toolchain
-and sysroot. The `oobe`, `nand`, `spi_boot` and `usb_boot` images are other variants. Ours is the plain eMMC image
-`sl2619_scarthgap`.
+```
+ls $UPD/usb-tool/eMMCimg/TAG*
+ls $UPD/usb-tool/eMMCimg/emmc_image_list $UPD/usb-tool/eMMCimg/home_s.subimg
+$UPD/usb-tool/bin/linux/x86_64/astra-update --help | head -n 1
+```
+**Check:** the tag reads `…rootfs-20260929…` (the v2.6.0 build), both files exist, and the tool prints
+`Astra Update Utility`.
+**If not:** `cd $UPD/usb-tool && rm -rf eMMCimg && unzip -q ../sl2619_scarthgap_6.12_v2.6.0.zip`, then repeat.
 
-What is inside the image zip (checked remotely on 2026-10-16): `eMMCimg/` with
-- `preboot`, `key`, `tzk`, `sysmgr`, `bl`, `boot`, `fastlogo`
-- `rootfs_s.subimg.0-2` for both `rootfs_a` and `rootfs_b` (2560 MB each)
-- **`home_s.subimg` → partition 18 = `/home`**
+### Step 3. The backup is complete and intact
 
-Both `emmc_image_list` and `emmc_image_list_full` write the home partition. **Flashing wipes `/home/root`.**
+```
+(cd $BAK && sha256sum -c --quiet SHA256SUMS && echo backup OK)
+ls $BAK/root/sl2610-examples/models/Synaptics/moonshine-tiny-bf16-torq/encoder.vmfb    # the irreplaceable file
+```
+**Check:** prints `backup OK`, and the encoder file exists.
 
-The `sl2619` USB boot image set (`astra-usbboot-images/sl2619/manifest.yaml`):
-- board `rdk`, ddr4, 2 GB
-- USB IDs: ROM USB boot `06cb:019e`, fastboot `18d1:4ee0`
+Anything written to the board's `/home` after 2026-10-17 18:00 is **not** in this backup. If you changed the board
+since then, make a new one and use it as `$BAK`:
+```
+scripts/board-backup.sh $HES/board-backup/$(date +%Y%m%d-%H%M)
+```
+(`/home/root/hes-221` is missing on purpose: test binaries, rebuilt from the host.)
+
+### Step 4. Host tools for afterwards
+
+```
+docker images sl2610-iree --format '{{.Tag}}'          # v2.2.1 and v2.0.0
+ls native/iree-torq-runtime/dist-221/lib               # app runtime for Torq 2.2.1
+ls build/packs                                         # the two packs the app uses
+```
+**Check:** both docker tags are listed, `dist-221/lib` has `libiree_torq_runtime.a`, and `build/packs` has the
+`asr-…` and `nlu-…` packs.
+**If not:** see [Appendix B](#appendix-b-rebuilding-the-host-side), then repeat.
+
+### Step 5. The board is in the known state
+
+```
+scripts/board-audit.sh
+```
+**Check:** the last line is `OK: board matches the lock`. Keep this output: it is the "before" record.
 
 ---
 
-## 3. Before you change anything (both paths)
+## Part 2: flash (at the board)
 
-### 3.1 Baseline
-```
-export BOARD=root@<board-ip>
-scripts/board-audit.sh                      # must end with "OK: board matches the lock"
-scripts/board-canaries.sh                   # 2.0.0 compiler × torq2-stable runtime
-```
-Record the app numbers as well, from the installed packs (CPU only, both int8):
-```
-ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-asr-check.kexe ~/.homeevensmarter/cartridges/asr-* \
-  /home/root/hes-wav/golden/g*.wav /home/root/hes-wav/ab_u*.wav /home/root/hes-wav/beckett5s.wav'      # RTF mean
-ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-nlu-check.kexe ~/.homeevensmarter/cartridges/nlu-*'   # golden 12
-ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-app-check.kexe --verify \
-  /home/root/hes-wav/golden/g01.wav /home/root/hes-wav/golden/g07.wav /home/root/hes-wav/golden/g10.wav'
-```
-Baseline of 2026-10-17 (Astra v2.4.0, Torq 2.0 driver, app runtime 2.0.0):
+### Step 6. [at the board] Shut down, connect USB
 
-| | value |
-|---|---|
-| ASR RTF (16 clips, paced) | 0.73 (0.65–0.85), finals 16/16 as recorded |
-| NLU | 610 ms/token, chunk ~3.8 s, warm-up 78 s, golden 11/12, p50 17.8 s |
-| app (g01/g07/g10) | 25.2 / 24.5 / 16.5 s per command, 3/3 tools, rss-peak 886 MB |
+1. `ssh $BOARD poweroff`, wait 10 s.
+2. Check the `SD_BOOT` jumper is **not** fitted.
+3. Connect a data-capable USB-C cable from the host to the board's **USB 2.0 Type-C port next to Ethernet**.
+4. Keep Ethernet connected. Power the board on if it went off.
 
-Copy the outputs into the log.
+**Check:** on the host, `lsusb | grep -E '06cb:019e|18d1:4ee0'` prints nothing yet. That is expected, because the
+board is not in USB boot mode.
 
-### 3.2 Backup (mandatory for Path B, recommended for A)
-```
-scripts/board-backup.sh ~/board-backup/$(date +%Y%m%d)       # all of /home except regenerable trees (~3.6 GB)
-FULL=1 scripts/board-backup.sh ~/board-backup/full-$(date +%Y%m%d)   # also the regenerable trees (~13 GB)
-(cd ~/board-backup/<date> && sha256sum -c --quiet SHA256SUMS && echo backup OK)
-```
-The irreplaceable file is the vendor Moonshine encoder, today's only working NPU encoder:
-`sl2610-examples/models/Synaptics/moonshine-tiny-bf16-torq/encoder.vmfb`.
+### Step 7. [at the board] Start the flashing tool
 
-Also save the board's identity for the rollback check:
 ```
-ssh $BOARD 'cat /etc/build*; uname -a; modinfo syna_npu' > ~/board-backup/<date>/board-info.txt
+cd $UPD/usb-tool && ./update_emmc.sh
 ```
+It asks for the sudo password, then waits for a device. Leave it running.
 
-### 3.3 Host compiler for Torq 2.2.1
-The 2.2.1 compiler wheel is `manylinux_2_39`, so it needs glibc ≥ 2.39; the Debian trixie base provides that.
-```
-docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.2.1 \
-  --build-arg TORQ_VERSION=2.2.1 --build-arg MANYLINUX=2_39 \
-  --build-arg BASE=python:3.12-slim-trixie board/docker
-docker run --rm --entrypoint sh sl2610-iree:v2.2.1 -c 'pip show torq-compiler | grep ^Version'   # → 2.2.1
-```
-Keep `sl2610-iree:v2.0.0` (default build args). It is the rollback compiler.
+**Check:** the tool is waiting and has not exited with an error.
 
-### 3.4 App runtime library for Torq 2.2.1
-```
-TORQ_TAG=v2.2.1 native/iree-torq-runtime/build-runtime.sh native/iree-torq-runtime/work-221    # IREE fork pin 1c6d87471fa9…
-```
-Build into a new work directory and keep the 2.0.0 one (`43014101c8ab…`). Then run the smoke test from
-`native/iree-torq-runtime` against it (`build-smoke.sh`, `run-on-board.sh`). It must list the `torq` driver and pass
-the CPU and NPU adds. The exec-v0 patch is not applied to 2.2.x: that runtime accepts every executable version up to 2.
+### Step 8. [at the board] Put the board into USB boot mode and flash
 
-Package it next to the 2.0.0 dist and link the app against it with a Gradle property:
-```
-OUT=native/iree-torq-runtime/dist-221 native/iree-torq-runtime/build-dist.sh native/iree-torq-runtime/work-221
-./gradlew -PireeDist=native/iree-torq-runtime/dist-221 :tui:linkAsrCheckReleaseExecutableLinuxArm64 …
-```
-Done on 2026-10-17, on the current board (Torq 2.0 driver): the smoke test passes (CPU and NPU adds), and the app
-linked against 2.2.1 runs today's packs (graphs from the 2.0.0 compiler) unchanged: ASR finals 16/16 identical,
-RTF 0.73; NLU 610–640 ms/token, same answers.
+1. Press and hold **RESET (SW6)**.
+2. While holding it, press and hold **USB_BOOT (SW7)**.
+3. Release **RESET**, keep holding **USB_BOOT**.
+4. Release **USB_BOOT** when the tool reports the device.
 
----
+**Check (during the flash):** in a second terminal, `lsusb | grep -E '06cb:019e|18d1:4ee0'` first shows `06cb:019e`
+(ROM USB boot), then `18d1:4ee0` (fastboot). The tool shows a progress bar per image: `preboot`, `key`, `tzk`,
+`sysmgr`, `bl`, `boot`, `fastlogo`, `rootfs`, `home`.
+**If not** (no device after 30 s): check the cable carries data and is in the port next to Ethernet, repeat the button
+sequence, and hold USB_BOOT longer.
 
-## 4. Path A: NPU module trial on the current image
+**Wait for the board to reset by itself.** The tool can report success before the last write has finished. Do
+**not** press RESET or unplug power now: a manual reset at this point can leave invalid partitions.
 
-Nothing is written outside `/home/root/torq-2.2.1`. A reboot restores the original module.
-If the kernel hangs, the board needs a **power cycle**, so do this when someone can reach the board or its power.
+**Check (after):** the tool reports success, and the board reboots on its own (LEDs, or Ethernet link comes back).
+**If not:** the tool keeps its temp directory and prints its path. Keep `astradevicemanager.log` from there and
+rerun step 7 with debug output: `sudo ./bin/linux/x86_64/astra-update -D -l stdout`.
 
-1. **Copy the 2.2.1 board files** (already done on 2026-10-16 for the runtime tool):
+### Step 9. [at the board] First login
+
+1. Unplug the USB-C cable.
+2. Find the board's IP address. It can change, because the MAC address or DHCP lease may differ. Look it up in the
+   router's DHCP list, or try the old one.
+3. On the host:
    ```
-   R=~/board-update/torq-2.2.1/astra-release
-   ssh $BOARD 'mkdir -p /home/root/torq-2.2.1'
-   ssh $BOARD 'cat > /home/root/torq-2.2.1/astra-sl-torq-run-module && chmod +x /home/root/torq-2.2.1/astra-sl-torq-run-module' < $R/tools/astra-sl-torq-run-module
-   ssh $BOARD 'cat > /home/root/torq-2.2.1/syna_npu.ko' < $R/lib/syna_npu.ko
-   ```
-2. **Check compatibility before loading.** All of these must hold, otherwise stop:
-   ```
-   ssh $BOARD 'uname -r; modinfo /home/root/torq-2.2.1/syna_npu.ko | grep vermagic'   # both 6.12.62 … aarch64
-   ssh $BOARD 'lsmod | grep syna_npu; ls -l /dev/torq'                               # loaded, used by 0
-   ssh $BOARD 'ps | grep -E "[t]orq|[i]ree-run|[h]es-tui"'                           # nothing using the NPU
-   ```
-3. **Swap the module in memory only:**
-   ```
-   ssh $BOARD 'rmmod syna_npu && insmod /home/root/torq-2.2.1/syna_npu.ko && dmesg | tail -n 20 && ls -l /dev/torq'
-   ```
-   If `insmod` refuses (`disagrees about version of symbol`, `Invalid module format`), the 2.4.0 kernel and the
-   2.2.1 module are not ABI-compatible. Run `insmod /lib/modules/6.12.62/updates/syna_npu.ko` to restore, record
-   the message, and go to Path B.
-4. **Gate:**
-   ```
-   scripts/board-canaries.sh sl2610-iree:v2.2.1 /home/root/torq-2.2.1/astra-sl-torq-run-module ""
-   ```
-5. **Restore:** `ssh $BOARD reboot`. The stock module loads from `/lib/modules/6.12.62/updates/` again. Then
-   `scripts/board-audit.sh` must print OK.
-
-Do **not** copy the 2.2.1 module into `/lib/modules`. A module that crashes during boot needs a reflash to recover.
-
----
-
-## 5. Path B: flash Astra SDK v2.6.0
-
-### 5.1 Prepare the flashing tool
-```
-cd ~/board-update/usb-tool
-rm -rf eMMCimg && unzip -q ../sl2619_scarthgap_6.12_v2.6.0.zip      # creates ./eMMCimg next to update_emmc.sh
-ls eMMCimg/emmc_image_list eMMCimg/rootfs.subimg.gz                  # sanity
-```
-`update_emmc.sh` runs `sudo ./bin/linux/x86_64/astra-update`, which flashes `./eMMCimg` and picks the boot image
-from `astra-usbboot-images/`. To run without sudo, install a udev rule for `06cb:019e` and `18d1:4ee0`.
-
-### 5.2 Flash
-1. Shut the board down cleanly: `ssh $BOARD poweroff`. Leave it powered (or power it back on).
-2. Connect the USB-C cable from the host to the board's **USB 2.0 Type-C port** (next to Ethernet).
-   Optional: open the serial console (`picocom -b 115200 /dev/ttyUSB0`).
-3. On the host, in `~/board-update/usb-tool`: `./update_emmc.sh`. It waits for a device.
-4. Put the board into USB boot mode:
-   1. press and hold **RESET (SW6)**
-   2. while holding it, press and hold **USB_BOOT (SW7)**
-   3. release **RESET**, keep holding **USB_BOOT**
-   4. release **USB_BOOT** once the tool reports the device (or the serial console shows USB boot)
-5. `astra-update` downloads U-Boot over USB and writes every partition. Progress bars show per image.
-6. **Wait for the board to reset by itself.** The tool can report success before the last write has finished.
-   A manual reset at this point can leave invalid partitions, which the Astra documentation notes especially for
-   SL2610.
-7. Log: if anything fails, `astra-update` keeps its temp directory and prints its path. Check
-   `astradevicemanager.log` there. Add `-D -l stdout` for debug output.
-
-### 5.3 First boot
-1. Find the board's address: from the serial console (`ip -4 addr show eth0`) or from the DHCP server.
-   It may differ from before.
-2. Log in as `root` (serial console, or ssh if the image allows it). Install the host key:
-   ```
-   ssh-copy-id root@<new-ip>      # or: cat ~/.ssh/id_*.pub | ssh root@<new-ip> 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
    export BOARD=root@<new-ip>
+   ssh-keygen -R ${BOARD#root@}           # the board has a new host key
+   ssh $BOARD 'cat /etc/build* | grep SYNA_SDK_REVISION; uname -r'
    ```
-3. Audit. DRIFT against the old lock is expected. Check the target values:
-   ```
-   scripts/board-audit.sh
-   ```
-   - `SDK_REVISION` is newer than `202605280005_202605291432`, and `KERNEL=6.12.62`
-   - `NPU_MODULE` present, `NPU_VERMAGIC` matches the kernel, `DEV_TORQ=present`
-   - `NPU_DEVFREQ` reports a frequency (devfreq and DVFS are new in this image)
-   - `ROOT_FREE` should be well above the old 54 MB
-   - `VULKAN_ICD`: still empty, or now registered? (input for the GPU spike)
-   - Torq runtimes in the image: `ls /usr/bin | grep -i -E "torq|iree"`, version strings via
-     `grep -aoE "torq-runtime/[0-9][^ ]*" <binary>`
-4. Plug in the USB microphone: `arecord -l` must list a USB card.
-   Record the card number for `hes-tui --mic plughw:<card>,0`.
 
-### 5.4 Torq on the new image
-- **Kernel module:** the image ships the Torq 2.2.0 module. Torq 2.2.1 changes nothing on the board side (PyPI
-  publishing, simulator XRAM, ONNX dependency pins), so keep the image's module. Only if `modinfo syna_npu` or
-  `dmesg | grep -i torq` show something older than 2.2: load `astra-release/lib/syna_npu.ko` the Path A way
-  (in memory) and verify. Install it under `/lib/modules/$(uname -r)/updates/` plus `depmod -a` only after it
-  passed the gate *and* serial access is available.
-- **Runtime for the canaries:** copy `astra-sl-torq-run-module` to `/home/root/torq-2.2.1/` as in Path A step 1.
-  Alternatively install the wheel into a venv under `/home/root` (`pip install torq_runtime-2.2.1-…-aarch64.whl`).
-  The app itself does not use either; it links `libiree_torq_runtime.a` built in 3.4.
+**Check:** `SYNA_SDK_REVISION` is newer than `202605280005_202605291432`, and the kernel is `6.12.62`. Login works
+without a password, as before.
+**If not:** no address or no login: use a 3.3 V USB-serial adapter on UART0 of the 40-pin header (115200 8N1), and
+run `ip -4 addr show eth0` there.
 
-### 5.5 Restore our files
-Only what is still needed. The vendor examples and models may now come with the image or from `torq-examples`.
-The backup holds `/home` as it was (`root/…`, `skainet-tinyllama/…`):
-```
-cd ~/board-backup/<date>
-tar cf - root/moon root/sl2610-examples root/cmd.wav root/hes-wav root/hes-bench | ssh $BOARD 'cd /home && tar xf -'
-```
-
-### 5.6 The app before any rebuild
-The app links its own IREE runtime (2.0.0) and runs on the CPU, so the unchanged binaries and packs should run on
-the new image. That separates "the image broke something" from "the 2.2.1 rebuild broke something":
-```
-BOARD=$BOARD scripts/deploy-tui.sh --no-build          # binary + private lib/libcrypt.so.1
-for b in hes-asr-check hes-nlu-check hes-app-check; do
-  cat tui/build/bin/linuxArm64/*/$b.kexe | ssh $BOARD "cat > /home/root/hes-tui/$b.kexe && chmod +x /home/root/hes-tui/$b.kexe"; done
-scripts/stage-asr-pack.sh && scripts/stage-nlu-pack.sh # if build/packs is gone; then copy both pack dirs to
-                                                       # /home/root/.homeevensmarter/cartridges/<id>/ (tar over ssh)
-```
-Then the three checks of 3.1. Expect the same numbers (CPU clocks may differ with DVFS); a failure to start
-(glibc, libasound, libcrypt) is an image change to note.
+From here on, nobody needs to be at the board, except for step 15 (plugging in the microphone).
 
 ---
 
-## 6. Gate (decides whether the update is kept)
+## Part 3: verify the new image (host)
 
+### Step 10. Audit
+
+```
+scripts/board-audit.sh
+```
+DRIFT lines against the old lock are expected. **Check** these values in the output:
+- `KERNEL=6.12.62`, `SDK_REVISION` from step 9
+- `NPU_MODULE` present, `NPU_VERMAGIC` matches the kernel, `DEV_TORQ=present`
+- `NPU_DEVFREQ` shows a frequency (new in this image)
+- `ROOT_FREE` is well above the old 54 MB
+
+Also record, for later:
+- `VULKAN_ICD`: still empty, or now registered?
+- `ssh $BOARD 'ls /usr/bin | grep -i -E "torq|iree"'`: the Torq tools the image ships
+
+**If not** (`DEV_TORQ` missing or the module is absent): run
+`ssh $BOARD 'dmesg | grep -i -E "torq|npu" | tail -n 20'`, keep the output and stop. The image is fine for the CPU
+app, but the NPU part needs investigation.
+
+### Step 11. Restore our files
+
+The flash wiped `/home`. The new image's `/home/weston` is left alone.
+```
+tar -C $BAK -cf - root skainet-tinyllama knbuild | ssh $BOARD 'tar -C /home -xf -'
+grep -v -E '  \./weston/' $BAK/SHA256SUMS | ssh $BOARD 'cd /home && sha256sum -c - | grep -v ": OK$"; echo restore checked'
+```
+**Check:** the second command prints only `restore checked`. Any other line names a file that did not arrive intact.
+**If not:** rerun the `tar` line, then the check.
+
+### Step 12. NPU gate (canaries)
+
+The Torq 2.2.1 runtime tool came back with step 11 (`/home/root/torq-2.2.1/astra-sl-torq-run-module`).
 ```
 scripts/board-canaries.sh sl2610-iree:v2.2.1 /home/root/torq-2.2.1/astra-sl-torq-run-module ""
 ```
+**Check:**
 
-| Canary | Tests | Required |
+| Canary | Required | Before the update |
 |---|---|---|
-| identity_1x4 | exec format loads, trivial graph | PASS |
-| chain2_64 | 2 chained matmuls | PASS |
-| **chain8_64** | 3+ dispatches, the silent-zeros case | PASS → multi-dispatch is trustworthy |
-| softmax_64 | CSS kernels (exp/reduce) | PASS |
+| identity_1x4 | PASS | PASS |
+| chain2_64 | PASS | PASS |
+| **chain8_64** | PASS | no output |
+| softmax_64 | PASS | no output / wrong values |
 
-Then run the real graphs:
-- the self-compiled Moonshine v2 encoder, golden-compared against CPU (cos-sim ≥ 0.999)
-- the vendor encoder, exec v0: rejected by 2.x runtimes without the R7 patch; recompile or replace it from
-  `torq-examples`
+The update is kept either way, as long as nothing regressed against the "before" column. What changes is the
+`NPU_MULTIDISPATCH_TRUSTED` value in step 16:
+- all PASS: `yes`
+- chain8_64 / softmax_64 still fail: `no`. Send the canary set and logs to the vendor support.
 
-Outcome:
-- **All PASS:** set `NPU_MULTIDISPATCH_TRUSTED=yes` and continue with section 7.
-- **chain8/softmax still fail:** keep the new image if nothing regressed, keep `NPU_MULTIDISPATCH_TRUSTED=no`, and
-  send the canary set + logs to Synaptics (`docs/synaptics-support` in the function-calling sample has a template).
+**If** identity_1x4 or chain2_64 fails, that is a regression: keep the output and stop here.
 
----
+### Step 13. The app, unchanged
 
-## 7. Rebuild and verify the app
+The app links its own runtime and runs on the CPU, so the binaries restored in step 11 should still work. This step
+separates "the image broke something" from "the rebuild broke something". The packs were not in the backup
+(regenerable), so install them first:
+```
+scripts/install-dev-packs.sh
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-asr-check.kexe ~/.homeevensmarter/cartridges/asr-* \
+  /home/root/hes-wav/golden/g*.wav /home/root/hes-wav/ab_u*.wav /home/root/hes-wav/beckett5s.wav'
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-nlu-check.kexe ~/.homeevensmarter/cartridges/nlu-*'
+ssh $BOARD 'cd /home/root/hes-tui && LD_LIBRARY_PATH=lib ./hes-app-check.kexe --verify \
+  /home/root/hes-wav/golden/g01.wav /home/root/hes-wav/golden/g07.wav /home/root/hes-wav/golden/g10.wav'
+```
+**Check** against the numbers from 2026-10-17 (int8 packs, NLU chunk 4):
 
-1. Recompile every board graph with `sl2610-iree:v2.2.1`: Moonshine NPU graphs, Gemma and the Moonshine CPU parts.
-   CPU graphs must come from the Torq fork compiler too, because upstream IREE vmfbs are rejected
-   (`required module features [Ch]`).
-2. Re-materialize the cartridges, serve them (`scripts/serve-cartridges.sh`), and download and verify them on the
-   board.
-3. Link the app against the 2.2.1 `libiree_torq_runtime.a`, then `scripts/deploy-tui.sh`.
-4. Golden set via WAV replay and live mic. Compare with the 3.1 baseline: latency per stage, RSS.
+| | before the update |
+|---|---|
+| ASR | RTF ≈ 0.73, finals 16/16 as recorded |
+| NLU | ≈ 610 ms/token, golden 11/12, p50 ≈ 8.9 s |
+| app g01 / g07 / g10 | 16.2 / 11.2 / 9.4 s per command, 3/3 tools |
 
-## 8. Update the lock
+The results must be the same. Times may differ a little, because the CPU clocks can change with DVFS.
+**If not:** the binary does not start (glibc, `libasound`, `libcrypt`): note the error, it is an image change.
+`ls -l /lib/libcrypt*` must still show `libcrypt.so.2`. Different results: keep the output and stop.
+
+### Step 14. The app against the Torq 2.2.1 runtime
+
+```
+./gradlew -PireeDist=native/iree-torq-runtime/dist-221 \
+  :tui:linkAsrCheckReleaseExecutableLinuxArm64 :tui:linkNluCheckReleaseExecutableLinuxArm64 \
+  :tui:linkAppCheckReleaseExecutableLinuxArm64 :tui:linkReleaseExecutableLinuxArm64
+scripts/deploy-tui.sh --no-build
+for b in hes-asr-check hes-nlu-check hes-app-check; do
+  cat tui/build/bin/linuxArm64/*/$b.kexe | ssh $BOARD "cat > /home/root/hes-tui/$b.kexe && chmod +x /home/root/hes-tui/$b.kexe"; done
+```
+Then rerun the three checks of step 13.
+**Check:** the same results as in step 13.
+
+### Step 15. [at the board] Microphone
+
+Plug in the USB microphone.
+```
+ssh $BOARD 'arecord -l'
+```
+**Check:** a `USB` card is listed next to `klamathasoc`. Note its card number, for
+`ssh -t $BOARD /home/root/hes-tui/hes-tui --mic plughw:<card>,0`.
+
+### Step 16. Record the new state
 
 Edit `board/board.lock`:
-- `BOARD_SDK=scarthgap_6.12_v2.6.0`, plus SDK revision, kernel and module path as audited
-- `TORQ_VERSION=2.2.1`, `TORQ_COMPILER=sl2610-iree:v2.2.1`, `TORQ_IREE_BASE`
-- `APP_RUNTIME`, `NPU_MULTIDISPATCH_TRUSTED`
-- clear the `TARGET_*` lines
+- `BOARD_SDK=scarthgap_6.12_v2.6.0`, and the SDK revision, kernel and module path from step 10
+- `TORQ_VERSION=2.2.1`, `TORQ_COMPILER=sl2610-iree:v2.2.1`
+- `APP_RUNTIME` (2.2.1 if step 14 passed), and `NPU_MULTIDISPATCH_TRUSTED` from step 12
+- delete the `TARGET_*` lines
 
-`scripts/board-audit.sh` must print OK. Commit the lock, scripts and log entry together.
+```
+scripts/board-audit.sh
+```
+**Check:** `OK: board matches the lock`. Commit the lock together with a log entry holding the outputs of steps 10,
+12 and 13.
+
+The update is done. Next: recompile the board graphs with `sl2610-iree:v2.2.1` and, if step 12 passed, move the
+Moonshine encoder to the NPU.
 
 ---
 
-## 9. Rollback
+## Rollback
 
-| Situation | Action |
+Use this when the new image does not boot, has no network, or regressed in step 12 or 13.
+
+1. Unpack the v2.4.0 image into the flashing tool:
+   ```
+   cd $UPD/usb-tool && rm -rf eMMCimg && unzip -q ../sl2619_scarthgap_6.12_v2.4.0.zip
+   ls eMMCimg/TAG*
+   ```
+   **Check:** the tag reads `…rootfs-20260530013802…` (the v2.4.0 build).
+2. **[at the board]** Steps 6 to 9 exactly as before.
+   **Check:** `SYNA_SDK_REVISION` = `202605280005_202605291432`.
+3. Step 11 (restore), then `scripts/install-dev-packs.sh`. Then redeploy the app built against the 2.0.0 runtime:
+   `./gradlew` without `-PireeDist`, followed by `scripts/deploy-tui.sh`.
+4. ```
+   git checkout board/board.lock && scripts/board-audit.sh
+   ```
+   **Check:** `OK: board matches the lock`, and step 13 shows the "before" numbers.
+
+The 2.0.0 compiler (`sl2610-iree:v2.0.0`) and the 2.0.0 app runtime (`native/iree-torq-runtime/dist`) stay on the
+host next to the 2.2.1 ones.
+
+---
+
+## Appendix A: background
+
+The board image, the Torq NPU kernel module (`syna_npu.ko`), the Torq runtime on the board and the Torq compiler on
+the host are versioned **as one set**. A model compiled by one Torq version and run on another either fails to load
+(`version N does not match expected version M`) or, worse, loads and returns zeros.
+
+| Astra SDK (board image) | Released | Kernel | Torq |
+|---|---|---|---|
+| scarthgap_6.12_v2.4.0 | 2026-05-30 | 6.12.62 | 2.0.0, **before** |
+| scarthgap_6.12_v2.6.0 | 2026-09-30 | 6.12.62 | 2.2.0 in the image, 2.2.1 framework, **after** |
+| scarthgap_6.12_v2.6.1 | 2026-10-13 | 6.12.62 | coralboard variants only, no plain `sl2619` image |
+
+Why: NPU graphs with three or more chained dispatches return zeros or nothing on Torq 2.0 (the self-compiled
+Moonshine encoder, canaries `chain8_64` / `softmax_64`). Torq 2.1/2.2 bring:
+- a fix for "runtime auto mode returning zeros or SIGSEGV"
+- tile-and-fuse improvements, LayerNorm on the NSS
+- `torq-decode-llm`
+- NPU devfreq (800 MHz → 1 GHz)
+
+Astra v2.6.0 adds NPU DVFS, eMMC tuning and newer firmware.
+
+Measured on the old image (2026-10-16/17):
+- The 2.2.1 compiler and runtime on the **old driver** do not fix multi-dispatch: chain8_64 and softmax_64 give
+  no output. The 2.2 driver from the new image is the open question that step 12 answers.
+- The app linked against the 2.2.1 runtime already runs the current packs unchanged on the old image: same ASR
+  finals, NLU 610–640 ms/token.
+
+The image zip holds `eMMCimg/` with `preboot`, `key`, `tzk`, `sysmgr`, `bl`, `boot`, `fastlogo`, `rootfs_s.subimg.*`
+and **`home_s.subimg` (partition 18 = `/home`)**. That is why the flash wipes `/home`. The USB boot image set used is
+`astra-usbboot-images/sl2619` (board `rdk`, DDR4, 2 GB).
+
+## Appendix B: rebuilding the host side
+
+Only needed if step 4 fails.
+
+| What | How |
 |---|---|
-| Before flashing | nothing on the board changed; delete `/home/root/torq-2.2.1` if wanted |
-| Path A, module swapped in memory | `ssh $BOARD reboot`; if it hangs: power cycle; then `scripts/board-audit.sh` = OK |
-| Path B, new image does not work | flash `sl2619_scarthgap_6.12_v2.4.0.zip` exactly as in 5.1–5.2, restore `/home/root` from the backup (5.5, plus `torq2-stable`, `torq2`, `demos`), redeploy the app built against the 2.0.0 runtime, `scripts/board-audit.sh` = OK |
-| Host tools | `sl2610-iree:v2.0.0` and the 2.0.0 runtime work directory are kept side by side; `board/board.lock` in git is the record |
+| downloads | `scripts/board-update-download.sh $UPD all` (sets: `image rollback torq usb-tool`), each verified against the release sha256 |
+| compiler image | `docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.2.1 --build-arg TORQ_VERSION=2.2.1 --build-arg MANYLINUX=2_39 --build-arg BASE=python:3.12-slim-trixie board/docker` |
+| app runtime | `TORQ_TAG=v2.2.1 native/iree-torq-runtime/build-runtime.sh native/iree-torq-runtime/work-221`, then `OUT=native/iree-torq-runtime/dist-221 native/iree-torq-runtime/build-dist.sh native/iree-torq-runtime/work-221` |
+| packs | `scripts/stage-asr-pack.sh` and `scripts/stage-nlu-pack.sh`, after the blueprint recipes (see the script headers) |
 
-## 10. Troubleshooting
+Downloads, pinned:
 
-- **`astra-update` sees no device:** `lsusb` must show `06cb:019e` in USB boot mode, then `18d1:4ee0` (fastboot)
-  once U-Boot runs. Check the cable carries data, use the Type-C port next to Ethernet, repeat the button sequence
-  and hold USB_BOOT longer. Run with `sudo` or install a udev rule.
-- **Board boots the old system or from SD:** remove the `SD_BOOT` jumper.
-- **No network after flashing:** use the serial console; the MAC address and DHCP lease may have changed.
-- **`pip install` of the 2.2.1 wheels fails on the host:** they need glibc ≥ 2.39. Use the docker image (3.3).
-- **Canaries say VERSION:** the compiler and runtime are from different Torq versions; use the matching pair.
-- **Root filesystem full:** never install into `/`; everything of ours lives in `/home/root`.
+| File | Source | sha256 |
+|---|---|---|
+| `sl2619_scarthgap_6.12_v2.6.0.zip` (725 MB) | [Astra SDK v2.6.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.6.0) | `9b15b709a45b0e4b5d6c1532277e2465aee960f862961805150e220fb7ac665f` |
+| `sl2619_scarthgap_6.12_v2.4.0.zip` (705 MB) | [Astra SDK v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0) | `7011b4fb6f4808834d80ff5f9096f6e596c87f68ee28c59cf6807cb082561de9` |
+| `astra-release.tar.gz` | [Torq v2.2.1](https://github.com/synaptics-torq/torq-compiler/releases/tag/v2.2.1) | `f71693087ec336674366e254197fb622fb939e353dfd34c745e766c1edfdf433` |
+| `torq_runtime-2.2.1-cp312-cp312-manylinux_2_39_aarch64.whl` | Torq v2.2.1 | `7c17c5c627670314119f3a868f0fa6a877f718ab30efbfe8ac2088b3fe93de4e` |
+| `torq_compiler-2.2.1-cp312-cp312-manylinux_2_39_x86_64.whl` | Torq v2.2.1 | `37b8d56f6e148db0dda229b7b231cc6ad06ab699639d9cc3ac459cb9680da259` |
+| usb-tool | [`synaptics-astra/usb-tool`](https://github.com/synaptics-astra/usb-tool) @ `91d4000af92f` (Git LFS) | pinned commit |
 
 ## References
 
-- Astra SDK releases: <https://github.com/synaptics-astra/sdk/releases>
-- Astra documentation, *Updating the eMMC* / *Running Astra Update*:
-  <https://synaptics-astra.github.io/doc/v/latest/linux/index.html>
+- Astra documentation, *Updating the eMMC*: <https://synaptics-astra.github.io/doc/v/latest/linux/index.html>
 - SL2600 hardware manual (buttons, boot straps): <https://synaptics-astra.github.io/doc/v/latest/hw/sl2600.html>
-- USB tool + boot images: <https://github.com/synaptics-astra/usb-tool>
-- astra-update source: <https://github.com/synaptics-astra/astra-update>
-- Torq releases and release notes: <https://github.com/synaptics-torq/torq-compiler/releases>
-- Torq examples (Moonshine, Gemma on the NPU): <https://github.com/synaptics-torq/torq-examples>
+- USB tool: <https://github.com/synaptics-astra/usb-tool>
+- Torq releases: <https://github.com/synaptics-torq/torq-compiler/releases>
+- Torq examples: <https://github.com/synaptics-torq/torq-examples>
