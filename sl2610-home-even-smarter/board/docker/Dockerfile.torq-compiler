@@ -5,7 +5,11 @@
 #   2.2.1 (update target):  docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.2.1 \
 #                             --build-arg TORQ_VERSION=2.2.1 --build-arg MANYLINUX=2_39 \
 #                             --build-arg BASE=python:3.12-slim-trixie board/docker
-# The 2.2.1 wheel is manylinux_2_39 (glibc >= 2.39), hence the Debian trixie base; 2.0.0–2.2.0 are manylinux_2_28.
+#   2.3.0 (after the flash): docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.3.0 \
+#                             --build-arg TORQ_VERSION=2.3.0 --build-arg MANYLINUX=2_39 \
+#                             --build-arg BASE=python:3.12-slim-trixie board/docker
+# The 2.2.1 and 2.3.0 wheels are manylinux_2_39 (glibc >= 2.39), hence the Debian trixie base; 2.0.0–2.2.0 are
+# manylinux_2_28.
 ARG BASE=python:3.12-slim
 FROM ${BASE}
 
