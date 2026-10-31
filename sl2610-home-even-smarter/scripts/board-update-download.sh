@@ -6,7 +6,7 @@
 #     image     Astra SDK scarthgap_6.12_v2.6.0 eMMC image for SL2619            (~725 MB)
 #     rollback  Astra SDK scarthgap_6.12_v2.4.0 eMMC image (the current board)   (~705 MB)
 #     torq      Torq 2.2.1: board runtime + NPU module, runtime wheel, compiler wheel, manuals (~110 MB)
-#     torq230   Torq 2.3.0: the same set, for the step after the flash (docs/BOARD-UPDATE.md Part 4) (~96 MB)
+#     torq230   Torq 2.3.0: the same set, the NPU tools the board runs (docs/BOARD-UPDATE.md) (~96 MB)
 #     moonshine Synaptics' prebuilt Moonshine-tiny NPU encoder.vmfb at three pinned Hugging Face revisions (~53 MB):
 #               the board's copy (Torq 2.0, May 2026), and the 2026-09-29 and 2026-10-19 builds
 #     usb-tool  synaptics-astra/usb-tool (astra-update v2.0.4 + USB boot images), Git LFS, pinned commit
