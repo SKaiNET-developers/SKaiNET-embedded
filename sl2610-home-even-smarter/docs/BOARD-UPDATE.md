@@ -98,11 +98,13 @@ ls build/packs
 **Check:** both Gradle runs end with `BUILD SUCCESSFUL`, and `build/packs` holds
 `asr-moonshine-v2-streaming-iree-cpu-sl26xx-dev` and `nlu-functiongemma-270m-iree-cpu-sl26xx-dev`.
 **If not** (compiler image not found): build the pack compiler image from `$HES/skainet-embedded-vendors`:
-`synaptics-torq/docker/build.sh`.
+`TORQ_VERSION=2.3.0 TORQ_MANYLINUX=2_39 TORQ_BASE_IMAGE=python:3.12-slim-trixie synaptics-torq/docker/build.sh`.
 
-The board graphs are CPU graphs compiled by the blueprints' pinned Torq-fork compiler
-(`skainet/iree-compiler-torq:2.0.0`, IREE 3.10 fork, the same base as Torq 2.3.0). Step 14 confirms they load on the
-2.3.0 runtime. The first run downloads the model sources named in the profiles.
+The board graphs are CPU graphs compiled by the blueprints' pinned Torq-fork compiler (`iree-tools-torq` in each
+`blueprint.json`). Use the blueprints branch `chore/torq-2.3.0`, which pins `skainet/iree-compiler-torq:2.3.0`, so
+compiler and board runtime come from the same Torq release; blueprints 0.2.2 itself still pins 2.0.0 (same IREE 3.10
+fork base, so it should load too, but that pairing is the less certain one). The first run downloads the model
+sources named in the profiles.
 
 ### Step 5. Build Home Even Smarter against the Torq 2.3.0 runtime
 
@@ -185,6 +187,13 @@ From here on, nobody needs to be at the board, except for step 15 (the microphon
 ---
 
 ## Part 3: Torq 2.3.0 and Home Even Smarter on the board (host)
+
+Steps 10–14 also run in one go, with each step's output saved to `build/bringup/<time>/` for step 16:
+```
+scripts/board-bringup.sh            # or a subset, e.g. scripts/board-bringup.sh 13 14
+```
+It stops after a failed step 11 or 13, records audit drift and canary failures without stopping, and never swaps the
+NPU driver. Then check its output against the steps below.
 
 ### Step 10. Audit the new image
 
@@ -303,8 +312,11 @@ scripts/board-audit.sh
 **Check:** `OK: board matches the lock`. Commit the lock together with a log entry holding the outputs of steps 10,
 12 and 14.
 
-Next: recompile the board graphs with `sl2610-iree:v2.3.0` (the blueprints' pack compiler is still 2.0.0) and, if
-step 12 passed, move the Moonshine encoder to the NPU.
+Next, if all four canaries passed in step 12: move the Moonshine encoder to the NPU. Our own SKaiNET encoder (the
+blueprint's `export/en/encoder.mlir`) compiles for the NPU with Torq 2.3.0 when `--torq-disable-css` is added: 15
+Torq executables, no CPU fallback modules. Without that flag the attention softmax fails with "CSS program
+allocations … exceed maximum CSS stack size" (the June weight-format crash of Torq 2.0 is gone). Whether its output
+is correct is the next board test.
 
 ---
 
@@ -384,6 +396,7 @@ and **`home_s.subimg` (partition 18 = `/home`)**. That is why the flash wipes `/
 | 2.3.0 compiler image | `docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.3.0 --build-arg TORQ_VERSION=2.3.0 --build-arg MANYLINUX=2_39 --build-arg BASE=python:3.12-slim-trixie board/docker` |
 | 2.3.0 app runtime | `TORQ_TAG=v2.3.0 native/iree-torq-runtime/build-runtime.sh native/iree-torq-runtime/work-230`, then `OUT=native/iree-torq-runtime/dist-230 native/iree-torq-runtime/build-dist.sh native/iree-torq-runtime/work-230` |
 | packs | the blueprint recipes of step 4, then `scripts/stage-asr-pack.sh` and `scripts/stage-nlu-pack.sh` |
+| 2.3.0 pack compiler image | in `$HES/skainet-embedded-vendors`: `TORQ_VERSION=2.3.0 TORQ_MANYLINUX=2_39 TORQ_BASE_IMAGE=python:3.12-slim-trixie synaptics-torq/docker/build.sh` → `skainet/iree-compiler-torq:2.3.0` |
 | 2.2.1 compiler image | `docker build -f board/docker/Dockerfile.torq-compiler -t sl2610-iree:v2.2.1 --build-arg TORQ_VERSION=2.2.1 --build-arg MANYLINUX=2_39 --build-arg BASE=python:3.12-slim-trixie board/docker` |
 | 2.2.1 app runtime | `TORQ_TAG=v2.2.1 native/iree-torq-runtime/build-runtime.sh native/iree-torq-runtime/work-221`, then `OUT=native/iree-torq-runtime/dist-221 native/iree-torq-runtime/build-dist.sh native/iree-torq-runtime/work-221` |
 
