@@ -69,7 +69,8 @@ set, `r` reset the home, `f` fakes on/off, `tab` cartridges (`i` fetch index, `d
 Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --server http://<host-ip>:8080`.
 
 Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skainet/iree-compiler-torq`, profiles in
-`cartridges/profiles/`). Until the signed packs for that target exist, `scripts/stage-nlu-pack.sh` and
+`cartridges/profiles/`); the ASR's `torq-sl26xx` target runs its encoder on the NPU (`scripts/stage-asr-pack.sh
+torq-sl26xx` places it on `torq`). Until the signed packs for that target exist, `scripts/stage-nlu-pack.sh` and
 `scripts/stage-asr-pack.sh` assemble unsigned development packs from the recipe outputs; check them on the board with
 `hes-nlu-check <pack-dir>` (golden set, timings, peak memory) and
 `hes-asr-check [--fast] [--verbose] <pack-dir> <file.wav>…` (16 kHz mono WAVs streamed like a microphone: partials,

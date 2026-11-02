@@ -3,7 +3,7 @@
 # (export → parameters → compile for a board target), in the layout the blueprint's PackDir reads, for board checks
 # before the signed materializeCartridge pack exists for that target.
 #   scripts/stage-asr-pack.sh [target] [lang] [dest]
-#     (defaults: cpu-sl26xx, en, build/packs/asr-moonshine-v2-streaming-iree-<target>-dev)
+#     (defaults: cpu-sl26xx, en, build/packs/asr-moonshine-v2-streaming-iree-<target>-dev; torq-sl26xx: encoder on the NPU)
 # Run the recipe first, in SKaiNET-cartridge-blueprints:
 #   ./gradlew :blueprints:asr-moonshine-v2-streaming-iree:{compile<Lang><Graph>...,weights<Lang>} -Pprofile=<profile>
 set -euo pipefail
@@ -19,7 +19,10 @@ for g in frontend encoder adapter prefill step; do cp "$BP/compile/$TARGET/$LANG
 # dec_embed.bin, plus params.irpa when the target's decoder graphs read it (not with int8 decoder graphs)
 rm -f "$W"/*; cp "$BP/weights/$LANG_"/* "$W/"
 cp "$BP/export/$LANG_/vocab.bin" "$T/"
-# descriptor + manifest; the stage devices default to the CPU (override: ASR_DEVICES="encoder=torq ...")
+# descriptor + manifest; the stage devices default to the CPU, the encoder to the NPU for torq-* targets
+# (override: ASR_DEVICES="encoder=torq ...")
+DEFAULT_DEVICES="frontend=local-task encoder=local-task adapter=local-task decoder=local-task"
+[[ $TARGET == torq-* ]] && DEFAULT_DEVICES="${DEFAULT_DEVICES/encoder=local-task/encoder=torq}"
 python3 -I "$HERE/scripts/finish-dev-pack.py" "$DEST" "$BP/../../../blueprint.json" "$TARGET" "$ID" --lang "$LANG_" \
-  $(for d in ${ASR_DEVICES:-frontend=local-task encoder=local-task adapter=local-task decoder=local-task}; do echo --device "$d"; done)
+  $(for d in ${ASR_DEVICES:-$DEFAULT_DEVICES}; do echo --device "$d"; done)
 du -sh "$DEST"; find "$DEST" -type f | sed "s|$DEST/||" | sort
