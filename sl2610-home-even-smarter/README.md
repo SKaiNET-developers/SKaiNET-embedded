@@ -31,7 +31,7 @@ USB mic → Moonshine v2 streaming ASR (Torq NPU) → FunctionGemma-270M (CPU / 
 | FunctionGemma NLU on the board (in-process, A55) | works: golden set 11/12 via `hes-nlu-check` (12/12 with the app's host rule), ~830 ms/token, RSS 1.3 GB |
 | Moonshine ASR on the board (in-process, A55) | works: streaming partials in real time, finals match the reference model on the test clips via `hes-asr-check`; final 2.3–2.7 s after the last sample, RSS 255 MB |
 | Whole app on the board (ASR + NLU + home, one process) | works: `hes-tui --load` / `hes-app-check`, spoken command → action in 21–37 s (NLU dominates), RSS 1.6 GB |
-| Torq target for the Moonshine blueprint | blocked on NPU multi-dispatch zeros; see the board update |
+| Torq target for the Moonshine blueprint | works: frontend + encoder on the NPU (bf16), golden finals identical to `cpu-sl26xx`, RTF 0.57 vs 0.77 |
 | Middleware client | pending protocol |
 | Board / Torq update 2.0 → 2.2 | procedure ready: [docs/BOARD-UPDATE.md](docs/BOARD-UPDATE.md) |
 
@@ -69,8 +69,8 @@ set, `r` reset the home, `f` fakes on/off, `tab` cartridges (`i` fetch index, `d
 Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --server http://<host-ip>:8080`.
 
 Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skainet/iree-compiler-torq`, profiles in
-`cartridges/profiles/`); the ASR's `torq-sl26xx` target runs its encoder on the NPU (`scripts/stage-asr-pack.sh
-torq-sl26xx` places it on `torq`). Until the signed packs for that target exist, `scripts/stage-nlu-pack.sh` and
+`cartridges/profiles/`); the ASR's `torq-sl26xx` target runs its frontend and encoder on the NPU
+(`scripts/stage-asr-pack.sh torq-sl26xx` places them on `torq`). Until the signed packs for that target exist, `scripts/stage-nlu-pack.sh` and
 `scripts/stage-asr-pack.sh` assemble unsigned development packs from the recipe outputs; check them on the board with
 `hes-nlu-check <pack-dir>` (golden set, timings, peak memory) and
 `hes-asr-check [--fast] [--verbose] <pack-dir> <file.wav>…` (16 kHz mono WAVs streamed like a microphone: partials,
