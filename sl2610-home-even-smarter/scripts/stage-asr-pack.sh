@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Assembles an UNSIGNED development pack_dir for the Moonshine v2 streaming ASR from the blueprint recipe's outputs
+# (export → parameters → compile for a board target), in the layout the blueprint's PackDir reads, for board checks
+# before the signed materializeCartridge pack exists for that target.
+#   scripts/stage-asr-pack.sh [target] [lang] [dest]
+#     (defaults: cpu-sl26xx, en, build/packs/asr-moonshine-v2-streaming-iree-<target>-dev; torq-sl26xx: frontend and encoder on the NPU)
+# Run the recipe first, in SKaiNET-cartridge-blueprints:
+#   ./gradlew :blueprints:asr-moonshine-v2-streaming-iree:{compile<Lang><Graph>...,weights<Lang>} -Pprofile=<profile>
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET="${1:-cpu-sl26xx}"
+LANG_="${2:-en}"
+ID="asr-moonshine-v2-streaming-iree-$TARGET-dev"
+DEST="${3:-$HERE/build/packs/$ID}"
+BP="${BLUEPRINTS_DIR:-$HERE/../../SKaiNET-cartridge-blueprints}/blueprints/asr-moonshine-v2-streaming-iree/build/blueprint/work"
+M="$DEST/artifacts/model/$LANG_"; W="$DEST/artifacts/weights/$LANG_"; T="$DEST/artifacts/tokenizer/$LANG_"
+mkdir -p "$M" "$W" "$T"
+for g in frontend encoder adapter prefill step; do cp "$BP/compile/$TARGET/$LANG_/$g.vmfb" "$M/"; done
+# dec_embed.bin, plus params.irpa when the target's decoder graphs read it (not with int8 decoder graphs)
+rm -f "$W"/*; cp "$BP/weights/$LANG_"/* "$W/"
+cp "$BP/export/$LANG_/vocab.bin" "$T/"
+# descriptor + manifest; the stage devices default to the CPU, the frontend and the encoder to the NPU for torq-* targets
+# (override: ASR_DEVICES="encoder=torq ...")
+DEFAULT_DEVICES="frontend=local-task encoder=local-task adapter=local-task decoder=local-task"
+[[ $TARGET == torq-* ]] && DEFAULT_DEVICES="frontend=torq encoder=torq adapter=local-task decoder=local-task"
+python3 -I "$HERE/scripts/finish-dev-pack.py" "$DEST" "$BP/../../../blueprint.json" "$TARGET" "$ID" --lang "$LANG_" \
+  $(for d in ${ASR_DEVICES:-$DEFAULT_DEVICES}; do echo --device "$d"; done)
+du -sh "$DEST"; find "$DEST" -type f | sed "s|$DEST/||" | sort

@@ -1,0 +1,12 @@
+--- a/runtime/driver/TorqExecutable.cc
++++ b/runtime/driver/TorqExecutable.cc
+@@ -663,7 +663,9 @@
+   auto runtimeVersion = ns(ExecutableDef_runtime_version_get(executableDef));
+ 
+-  if (runtimeVersion != 2) {
++  // R1 experiment: also accept exec-format v0 (vendor prebuilt encoder), as the 2.0.0a1
++  // runtime does. Opt-in via TORQ_ACCEPT_EXEC_V0=1 at runtime.
++  if (runtimeVersion != 2 && !(runtimeVersion == 0 && getenv("TORQ_ACCEPT_EXEC_V0"))) {
+     return iree_make_status(IREE_STATUS_UNAVAILABLE, "executable runtime version %d does not match expected version %d", runtimeVersion, 2);
+   }
+ 
