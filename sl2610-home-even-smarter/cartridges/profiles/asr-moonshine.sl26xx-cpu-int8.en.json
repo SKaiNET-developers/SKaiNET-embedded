@@ -5,7 +5,7 @@
     "id": "asr-moonshine-v2-streaming-iree",
     "version": "0.1.0"
   },
-  "target": "torq-sl26xx-encoder-cpu",
+  "target": "sl26xx-cpu-int8",
   "flavors": [
     "en"
   ],
