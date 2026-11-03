@@ -18,7 +18,10 @@
  *   - per-stage timing lines go to stderr only when asked for (the TUI owns the terminal);
  *   - the window at frame 0 gets no frontend left context instead of zero audio (see process_window), which the
  *     original feeds, and which costs it whole transcripts on clips that start with speech after a pause;
- *   - an empty partial (leading spaces only) is not surfaced.
+ *   - an empty partial (leading spaces only) is not surfaced;
+ *   - with a cross-K/V adapter (`cross_kv_cache` targets: it returns the window's memory rows, then each layer's cross
+ *     K and V for them), the finalized rows' K/V go into a cache once, prefill reads the cache instead of the memory,
+ *     and a prefill that only refreshes the cross views runs no graph.
  */
 #define _GNU_SOURCE  /* mmap */
 #include "hes_iree_internal.h"
@@ -85,6 +88,7 @@ struct hes_ms {
   float* mem64;  /* CHUNK x dim */
   float* mem256; /* MAXMEM x dim */
   float* mask;   /* MAXMEM */
+  float* kvwin;  /* heads x CHUNK x hd: one adapter K/V output */
   float* row;    /* vocab.n */
   void* xfer; size_t xfer_len; /* host bounce buffer for views crossing devices */
 
@@ -92,6 +96,8 @@ struct hes_ms {
   float* pcm; int npcm;
   int win;
   float* mem; int nmem;  /* MAXMEM x dim finalized memory rows */
+  int kv_cached;         /* the adapter returns cross K/V (found at the first window) */
+  float* kvc;            /* per layer K, V: heads x MAXMEM x hd, the finalized rows' cross K/V */
   iree_hal_buffer_view_t* sk[MAXLAYERS], *sv[MAXLAYERS], *ck[MAXLAYERS], *cv[MAXLAYERS];
   int has_self, has_cross;
   int toks[MAXTOK]; int ntoks; int pos;
@@ -325,13 +331,16 @@ static int process_window(hes_ms* e, int start, int produced, int flush, int pee
       mkview(e, &e->adp, (iree_hal_dim_t[]){1, CHUNK}, 2, IREE_HAL_ELEMENT_TYPE_INT_32, posv, sizeof posv),
       to_device(e, &e->enc, &e->adp, enco)};
   iree_hal_buffer_view_release(enco);
-  iree_hal_buffer_view_t* memo = NULL;
-  if (ins[0] && ins[1]) call(e, &e->adp, FN_ADP, ins, 2, &memo, 1);
+  iree_hal_buffer_view_t* adpo[1 + 2 * MAXLAYERS] = {0};
+  int na = ins[0] && ins[1] ? call(e, &e->adp, FN_ADP, ins, 2, adpo, 1 + 2 * e->nl) : -1;
   for (int i = 0; i < 2; ++i) if (ins[i]) iree_hal_buffer_view_release(ins[i]);
-  if (!memo) return -1;
-  rc = pull(e, &e->adp, memo, e->mem64, (size_t)CHUNK * e->dim * sizeof(float));
-  iree_hal_buffer_view_release(memo);
-  if (rc) return -1;
+  if (na != 1 && na != 1 + 2 * e->nl) {
+    for (int i = 0; i < na; ++i) iree_hal_buffer_view_release(adpo[i]);
+    if (na >= 0) { hes__set_error("moonshine adapter: %d outputs, 1 or %d expected", na, 1 + 2 * e->nl); e->errors++; }
+    return -1;
+  }
+  e->kv_cached = na > 1;
+  rc = pull(e, &e->adp, adpo[0], e->mem64, (size_t)CHUNK * e->dim * sizeof(float));
 
   /* finalize [nmem, new_final); at flush the lookahead holds nothing back */
   int limit = flush ? start + CHUNK : start + CHUNK - LOOKAHEAD;
@@ -340,8 +349,18 @@ static int process_window(hes_ms* e, int start, int produced, int flush, int pee
   /* The real window 0 overwrites rows an early peek finalized with a zero-padded tail; regular windows only append
    * (their overlap rows were finalized with a fuller attention band by the previous window). */
   int first = (!peek && start == 0 && e->peeked) ? 0 : e->nmem;
-  for (int f = first; f < new_final; ++f)
+  for (int f = first; rc == 0 && f < new_final; ++f)
     memcpy(e->mem + (size_t)f * e->dim, e->mem64 + (size_t)(f - start) * e->dim, (size_t)e->dim * sizeof(float));
+  /* the same rows' cross K/V: [1, heads, CHUNK, hd] per output into [heads, MAXMEM, hd] per layer and side */
+  const int heads = e->dim / e->hd;
+  for (int j = 0; rc == 0 && j < na - 1; ++j) {
+    rc = pull(e, &e->adp, adpo[1 + j], e->kvwin, (size_t)heads * CHUNK * e->hd * sizeof(float));
+    for (int h = 0; rc == 0 && h < heads && new_final > first; ++h)
+      memcpy(e->kvc + (((size_t)j * heads + h) * MAXMEM + first) * e->hd, e->kvwin + ((size_t)h * CHUNK + first - start) * e->hd,
+             (size_t)(new_final - first) * e->hd * sizeof(float));
+  }
+  for (int i = 0; i < na; ++i) iree_hal_buffer_view_release(adpo[i]);
+  if (rc) return -1;
   if (new_final > e->nmem) e->nmem = new_final;
   if (!peek && start == 0) e->peeked = 0;
   double t3 = now_ms();
@@ -355,9 +374,60 @@ static void fill_mask(hes_ms* e) {
   for (int f = 0; f < MAXMEM; ++f) e->mask[f] = f < e->nmem ? 0.0f : NEGMASK;
 }
 
+/* Cross views over the K/V cache, and with `start_tokens` the prefill that reads them (see run_prefill). */
+static int run_prefill_cached(hes_ms* e, int start_tokens, double tp) {
+  size_t row = (size_t)e->dim;
+  const int heads = e->dim / e->hd;
+  size_t side = (size_t)heads * MAXMEM * e->hd;
+  iree_hal_dim_t kvshape[4] = {1, (iree_hal_dim_t)heads, MAXMEM, (iree_hal_dim_t)e->hd};
+  release_cross(e);
+  int ok = 1;
+  for (int l = 0; l < e->nl; ++l) {
+    e->ck[l] = mkview(e, &e->pre, kvshape, 4, IREE_HAL_ELEMENT_TYPE_FLOAT_32, e->kvc + 2 * l * side, side * sizeof(float));
+    e->cv[l] = mkview(e, &e->pre, kvshape, 4, IREE_HAL_ELEMENT_TYPE_FLOAT_32, e->kvc + (2 * l + 1) * side, side * sizeof(float));
+    ok = ok && e->ck[l] && e->cv[l];
+  }
+  e->has_cross = 1;
+  if (!ok) return -1;
+  e->halted = 0; e->ended_eos = 0;
+  if (!start_tokens) { e->prefill_ms += now_ms() - tp; return 0; }  /* counted as time, not as a prefill call */
+
+  fill_mask(e);
+  iree_hal_dim_t d = (iree_hal_dim_t)e->dim;
+  /* inputs: BOS embedding, per layer cross K, cross V, then the mask; outputs: per layer self K, self V, then logits */
+  iree_hal_buffer_view_t* ins[2 + 2 * MAXLAYERS] = {0};
+  int n_in = 0;
+  ins[n_in++] = mkview(e, &e->pre, (iree_hal_dim_t[]){1, 1, d}, 3, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                       e->embed + (size_t)BOS * row, row * sizeof(float));
+  for (int l = 0; l < e->nl; ++l) { ins[n_in++] = e->ck[l]; ins[n_in++] = e->cv[l]; }
+  iree_hal_buffer_view_t* maskv = mkview(e, &e->pre, (iree_hal_dim_t[]){1, 1, 1, MAXMEM}, 4, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                                         e->mask, MAXMEM * sizeof(float));
+  ins[n_in++] = maskv;
+  iree_hal_buffer_view_t* outs[2 * MAXLAYERS + 1] = {0};
+  int want = 2 * e->nl + 1;
+  int n = ins[0] && maskv ? call(e, &e->pre, FN_PRE, ins, n_in, outs, want) : -1;
+  if (ins[0]) iree_hal_buffer_view_release(ins[0]);
+  if (maskv) iree_hal_buffer_view_release(maskv);
+  if (n != want) {
+    for (int i = 0; i < n; ++i) iree_hal_buffer_view_release(outs[i]);
+    if (n >= 0) { hes__set_error("moonshine prefill: %d outputs, %d expected", n, want); e->errors++; }
+    return -1;
+  }
+  release_self(e);
+  for (int l = 0; l < e->nl; ++l) { e->sk[l] = outs[2 * l]; e->sv[l] = outs[2 * l + 1]; }
+  e->has_self = 1;
+  int tok = argmax_logits(e, outs[2 * e->nl]);
+  iree_hal_buffer_view_release(outs[2 * e->nl]);
+  e->ntoks = 0; e->pos = 1; e->text[0] = 0;
+  if (tok != EOS) { e->toks[e->ntoks++] = tok; detok_append(&e->vocab, tok, e->text, sizeof e->text); }
+  e->prefill_ms += now_ms() - tp; e->prefills++;
+  return 0;
+}
+
 /* Prefill over the finalized memory: refreshes cross-K/V and, with `start_tokens`, restarts the token sequence. */
 static int run_prefill(hes_ms* e, int start_tokens) {
   double tp = now_ms();
+  if (e->kv_cached) return run_prefill_cached(e, start_tokens, tp);
   size_t row = (size_t)e->dim;
   memcpy(e->mem256, e->mem, (size_t)e->nmem * row * sizeof(float));
   memset(e->mem256 + (size_t)e->nmem * row, 0, (size_t)(MAXMEM - e->nmem) * row * sizeof(float));
@@ -531,7 +601,8 @@ void hes_ms_release(hes_ms* e) {
   vocab_free(&e->vocab);
   if (e->embed_map) munmap(e->embed_map, e->embed_len);
   free(e->rope_c); free(e->rope_s);
-  free(e->fein); free(e->feats); free(e->mem64); free(e->mem256); free(e->mask); free(e->row); free(e->xfer);
+  free(e->fein); free(e->feats); free(e->mem64); free(e->mem256); free(e->mask); free(e->kvwin); free(e->kvc);
+  free(e->row); free(e->xfer);
   free(e->pcm); free(e->mem);
   free(e);
 }
@@ -603,7 +674,10 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
   e->row = malloc((size_t)e->vocab.n * sizeof(float));
   e->pcm = malloc(MAXPCM * sizeof(float));
   e->mem = calloc((size_t)MAXMEM * e->dim, sizeof(float));
-  if (!e->rope_c || !e->rope_s || !e->fein || !e->feats || !e->mem64 || !e->mem256 || !e->mask || !e->row || !e->pcm || !e->mem) {
+  e->kvwin = malloc((size_t)CHUNK * e->dim * sizeof(float));                    /* heads x CHUNK x hd = CHUNK x dim */
+  e->kvc = calloc((size_t)2 * e->nl * MAXMEM * e->dim, sizeof(float));          /* 2 x layers x heads x MAXMEM x hd */
+  if (!e->rope_c || !e->rope_s || !e->fein || !e->feats || !e->mem64 || !e->mem256 || !e->mask || !e->row || !e->pcm || !e->mem ||
+      !e->kvwin || !e->kvc) {
     hes__set_error("moonshine: out of memory");
     goto fail;
   }
