@@ -19,9 +19,9 @@
  *   - the window at frame 0 gets no frontend left context instead of zero audio (see process_window), which the
  *     original feeds, and which costs it whole transcripts on clips that start with speech after a pause;
  *   - an empty partial (leading spaces only) is not surfaced;
- *   - with a cross-K/V adapter (`cross_kv_cache` targets: it returns the window's memory rows, then each layer's cross
- *     K and V for them), the finalized rows' K/V go into a cache once, prefill reads the cache instead of the memory,
- *     and a prefill that only refreshes the cross views runs no graph.
+ *   - when the encoder module also exports moonshine_v2_cross_kv (`cross_kv_cache` targets: the adapter's rows to
+ *     every layer's cross K and V, side by side), the finalized rows' K/V go into a cache once, prefill reads the
+ *     cache instead of the memory, and a prefill that only refreshes the cross views runs no graph.
  */
 #define _GNU_SOURCE  /* mmap */
 #include "hes_iree_internal.h"
@@ -68,6 +68,7 @@
 static const char* FN_FE = "module.moonshine_v2_frontend";
 static const char* FN_ENC = "module.moonshine_v2_encoder";
 static const char* FN_ADP = "module.moonshine_v2_adapter";
+static const char* FN_XKV = "module.moonshine_v2_cross_kv";  /* optional, in the encoder module */
 static const char* FN_PRE = "module.moonshine_v2_decoder_prefill";
 static const char* FN_STEP = "module.moonshine_v2_decoder_with_past";
 
@@ -88,7 +89,7 @@ struct hes_ms {
   float* mem64;  /* CHUNK x dim */
   float* mem256; /* MAXMEM x dim */
   float* mask;   /* MAXMEM */
-  float* kvwin;  /* heads x CHUNK x hd: one adapter K/V output */
+  float* kvwin;  /* CHUNK x (2 nl x dim): the window rows' K/V, output j of a row at j x dim, head h at h x hd */
   float* row;    /* vocab.n */
   void* xfer; size_t xfer_len; /* host bounce buffer for views crossing devices */
 
@@ -96,7 +97,7 @@ struct hes_ms {
   float* pcm; int npcm;
   int win;
   float* mem; int nmem;  /* MAXMEM x dim finalized memory rows */
-  int kv_cached;         /* the adapter returns cross K/V (found at the first window) */
+  int kv_cached;         /* the encoder module exports FN_XKV */
   float* kvc;            /* per layer K, V: heads x MAXMEM x hd, the finalized rows' cross K/V */
   iree_hal_buffer_view_t* sk[MAXLAYERS], *sv[MAXLAYERS], *ck[MAXLAYERS], *cv[MAXLAYERS];
   int has_self, has_cross;
@@ -331,16 +332,24 @@ static int process_window(hes_ms* e, int start, int produced, int flush, int pee
       mkview(e, &e->adp, (iree_hal_dim_t[]){1, CHUNK}, 2, IREE_HAL_ELEMENT_TYPE_INT_32, posv, sizeof posv),
       to_device(e, &e->enc, &e->adp, enco)};
   iree_hal_buffer_view_release(enco);
-  iree_hal_buffer_view_t* adpo[1 + 2 * MAXLAYERS] = {0};
-  int na = ins[0] && ins[1] ? call(e, &e->adp, FN_ADP, ins, 2, adpo, 1 + 2 * e->nl) : -1;
+  iree_hal_buffer_view_t* adpo = NULL;
+  int na = ins[0] && ins[1] ? call(e, &e->adp, FN_ADP, ins, 2, &adpo, 1) : -1;
   for (int i = 0; i < 2; ++i) if (ins[i]) iree_hal_buffer_view_release(ins[i]);
-  if (na != 1 && na != 1 + 2 * e->nl) {
-    for (int i = 0; i < na; ++i) iree_hal_buffer_view_release(adpo[i]);
-    if (na >= 0) { hes__set_error("moonshine adapter: %d outputs, 1 or %d expected", na, 1 + 2 * e->nl); e->errors++; }
+  if (na != 1) {
+    if (na == 0) { hes__set_error("moonshine adapter: no output"); e->errors++; }
     return -1;
   }
-  e->kv_cached = na > 1;
-  rc = pull(e, &e->adp, adpo[0], e->mem64, (size_t)CHUNK * e->dim * sizeof(float));
+  rc = pull(e, &e->adp, adpo, e->mem64, (size_t)CHUNK * e->dim * sizeof(float));
+  /* the window rows' cross K/V, next to the encoder */
+  const size_t kvrow = (size_t)2 * e->nl * e->dim;
+  if (rc == 0 && e->kv_cached) {
+    iree_hal_buffer_view_t* xin = to_device(e, &e->adp, &e->enc, adpo);
+    iree_hal_buffer_view_t* xkv = xin ? run1(e, &e->enc, FN_XKV, xin) : NULL;
+    if (xin) iree_hal_buffer_view_release(xin);
+    rc = xkv ? pull(e, &e->enc, xkv, e->kvwin, CHUNK * kvrow * sizeof(float)) : -1;
+    if (xkv) iree_hal_buffer_view_release(xkv);
+  }
+  iree_hal_buffer_view_release(adpo);
 
   /* finalize [nmem, new_final); at flush the lookahead holds nothing back */
   int limit = flush ? start + CHUNK : start + CHUNK - LOOKAHEAD;
@@ -351,15 +360,13 @@ static int process_window(hes_ms* e, int start, int produced, int flush, int pee
   int first = (!peek && start == 0 && e->peeked) ? 0 : e->nmem;
   for (int f = first; rc == 0 && f < new_final; ++f)
     memcpy(e->mem + (size_t)f * e->dim, e->mem64 + (size_t)(f - start) * e->dim, (size_t)e->dim * sizeof(float));
-  /* the same rows' cross K/V: [1, heads, CHUNK, hd] per output into [heads, MAXMEM, hd] per layer and side */
+  /* the same rows' cross K/V into [heads, MAXMEM, hd] per layer and side */
   const int heads = e->dim / e->hd;
-  for (int j = 0; rc == 0 && j < na - 1; ++j) {
-    rc = pull(e, &e->adp, adpo[1 + j], e->kvwin, (size_t)heads * CHUNK * e->hd * sizeof(float));
-    for (int h = 0; rc == 0 && h < heads && new_final > first; ++h)
-      memcpy(e->kvc + (((size_t)j * heads + h) * MAXMEM + first) * e->hd, e->kvwin + ((size_t)h * CHUNK + first - start) * e->hd,
-             (size_t)(new_final - first) * e->hd * sizeof(float));
-  }
-  for (int i = 0; i < na; ++i) iree_hal_buffer_view_release(adpo[i]);
+  for (int f = first; rc == 0 && e->kv_cached && f < new_final; ++f)
+    for (int j = 0; j < 2 * e->nl; ++j)
+      for (int h = 0; h < heads; ++h)
+        memcpy(e->kvc + (((size_t)j * heads + h) * MAXMEM + f) * e->hd, e->kvwin + (size_t)(f - start) * kvrow + (size_t)j * e->dim + (size_t)h * e->hd,
+               (size_t)e->hd * sizeof(float));
   if (rc) return -1;
   if (new_final > e->nmem) e->nmem = new_final;
   if (!peek && start == 0) e->peeked = 0;
@@ -663,6 +670,10 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
       open_stage(e, &e->pre, dev_decoder, vmfb_prefill, irpa) ||
       open_stage(e, &e->step, dev_decoder, vmfb_step, irpa))
     goto fail;
+  {  /* the cross-K/V cache, when the encoder module computes the window rows' K/V */
+    iree_vm_function_t fn;
+    e->kv_cached = iree_status_consume_code(iree_runtime_session_lookup_function(e->enc.session, iree_make_cstring_view(FN_XKV), &fn)) == IREE_STATUS_OK;
+  }
 
   e->rope_c = malloc((size_t)(MAXTOK + 4) * e->hd * sizeof(float));
   e->rope_s = malloc((size_t)(MAXTOK + 4) * e->hd * sizeof(float));
@@ -674,7 +685,7 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
   e->row = malloc((size_t)e->vocab.n * sizeof(float));
   e->pcm = malloc(MAXPCM * sizeof(float));
   e->mem = calloc((size_t)MAXMEM * e->dim, sizeof(float));
-  e->kvwin = malloc((size_t)CHUNK * e->dim * sizeof(float));                    /* heads x CHUNK x hd = CHUNK x dim */
+  e->kvwin = malloc((size_t)CHUNK * 2 * e->nl * e->dim * sizeof(float));        /* CHUNK x 2 x layers x dim */
   e->kvc = calloc((size_t)2 * e->nl * MAXMEM * e->dim, sizeof(float));          /* 2 x layers x heads x MAXMEM x hd */
   if (!e->rope_c || !e->rope_s || !e->fein || !e->feats || !e->mem64 || !e->mem256 || !e->mask || !e->row || !e->pcm || !e->mem ||
       !e->kvwin || !e->kvc) {
