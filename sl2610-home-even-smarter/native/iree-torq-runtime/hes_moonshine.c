@@ -19,6 +19,9 @@
  *   - the window at frame 0 gets no frontend left context instead of zero audio (see process_window), which the
  *     original feeds, and which costs it whole transcripts on clips that start with speech after a pause;
  *   - an empty partial (leading spaces only) is not surfaced;
+ *   - with frontend_step.vmfb next to frontend.vmfb (the original's incremental frontend, 35103361), the frontend
+ *     runs on 16 + 4 frames as the audio arrives, on the frontend's device, and a window or the flush only computes
+ *     the frames past the fed audio;
  *   - when the encoder module also exports moonshine_v2_cross_kv (`cross_kv_cache` targets: the adapter's rows to
  *     every layer's cross K and V, side by side), the finalized rows' K/V go into a cache once, prefill reads the
  *     cache instead of the memory, and a prefill that only refreshes the cross views runs no graph.
@@ -48,6 +51,15 @@
 #define FE_IN ((CHUNK + FE_LC) * SPF)    /* 21760 samples */
 #define FE_OUT (CHUNK + FE_LC)           /* 68 frames out */
 #define MAXMEM 256                       /* compiled cross-memory pad (5.12 s of finalized speech) */
+/* Incremental frontend (optional frontend_step.vmfb next to frontend.vmfb): the same frontend exported for FE_STEP +
+ * FE_LC frames, run as the audio arrives, so a window only runs the encoder and the adapter on features that exist.
+ * The frontend is causal: output frame f reads 200 Hz frames 4f-12..4f, i.e. 3 frames of left context, so FE_LC = 4
+ * frames of real audio in front of a chunk make its kept frames exact. */
+#define FE_STEP 16                       /* frames per incremental frontend call (0.32 s) */
+#define FES_IN ((FE_STEP + FE_LC) * SPF) /* 6400 samples */
+#define FES_OUT (FE_STEP + FE_LC)        /* 20 frames out */
+#define MAXF (MAXMEM + CHUNK + FES_OUT)  /* feature cache, frames */
+#define FE_RF 4                          /* frames past `produced` that still see audio (3 of context + a partly fed last one) */
 #define MAXTOK 48
 #define MAXLAYERS 16
 #define FINISH_TOKENS 24                    /* hard ceiling for the final budget (see finish_budget) */
@@ -77,6 +89,7 @@ typedef struct { int n; char** t; } Vocab;
 struct hes_ms {
   hes_runtime* rt;
   hes_session fe, enc, adp, pre, step;  /* each on its stage's device (borrowed from the runtime) */
+  hes_session fes;                      /* incremental frontend on the frontend's device; session NULL = absent */
   int nl, hd, dim, enc_dim, rot;
   int lag_budget_ms, fast_finish, verbose, no_peek, partial_every;
   Vocab vocab;
@@ -86,6 +99,9 @@ struct hes_ms {
   /* scratch */
   float* fein;   /* FE_IN */
   float* feats;  /* FE_OUT x enc_dim */
+  float* fesin;  /* FES_IN */
+  float* fesout; /* FES_OUT x enc_dim */
+  float* fe_silence; /* enc_dim: the frontend's output past the audio (every frame of zero padding beyond FE_RF) */
   float* mem64;  /* CHUNK x dim */
   float* mem256; /* MAXMEM x dim */
   float* mask;   /* MAXMEM */
@@ -95,6 +111,8 @@ struct hes_ms {
 
   /* utterance state */
   float* pcm; int npcm;
+  float* feat; int fe_done;  /* MAXF x enc_dim features of this utterance; [0, fe_done) exact, never recomputed */
+  double fe_feed_ms; int fe_calls;  /* incremental frontend cost while the audio streams in */
   int win;
   float* mem; int nmem;  /* MAXMEM x dim finalized memory rows */
   int kv_cached;         /* the encoder module exports FN_XKV */
@@ -289,6 +307,41 @@ static int finish_budget(int npcm) {
 
 /* ---------- stages ---------- */
 
+/* One incremental frontend call for the chunk starting at frame `s`, zero-padded past the fed audio, fed from sample 0
+ * when s < FE_LC (the model's own padding is then the utterance start, see process_window). Writes frames s ..
+ * s+n-1 into e->feat and returns n, or -1. */
+static int fe_chunk(hes_ms* e, int s) {
+  const int lc = s < FE_LC ? s : FE_LC;
+  const int s0 = (s - lc) * SPF;
+  for (int i = 0; i < FES_IN; ++i) {
+    int si = s0 + i;
+    e->fesin[i] = (si >= 0 && si < e->npcm) ? e->pcm[si] : 0.0f;
+  }
+  iree_hal_buffer_view_t* v = mkview(e, &e->fes, (iree_hal_dim_t[]){1, FES_IN}, 2, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                                     e->fesin, FES_IN * sizeof(float));
+  iree_hal_buffer_view_t* o = v ? run1(e, &e->fes, FN_FE, v) : NULL;
+  if (v) iree_hal_buffer_view_release(v);
+  if (!o) return -1;
+  int rc = pull(e, &e->fes, o, e->fesout, (size_t)FES_OUT * e->enc_dim * sizeof(float));
+  iree_hal_buffer_view_release(o);
+  if (rc) return -1;
+  int n = FES_OUT - lc;
+  if (s + n > MAXF) n = MAXF - s;
+  memcpy(e->feat + (size_t)s * e->enc_dim, e->fesout + (size_t)lc * e->enc_dim, (size_t)n * e->enc_dim * sizeof(float));
+  return n;
+}
+
+/* Extends the exact features as far as the fed audio allows, in whole FE_STEP chunks. */
+static void fe_advance(hes_ms* e, int produced) {
+  while (e->fes.session && e->fe_done + FE_STEP <= produced && e->fe_done + FES_OUT <= MAXF) {
+    double t0 = now_ms();
+    int n = fe_chunk(e, e->fe_done);
+    if (n <= 0) break;
+    e->fe_done += n < produced - e->fe_done ? n : produced - e->fe_done;
+    e->fe_feed_ms += now_ms() - t0; e->fe_calls++;
+  }
+}
+
 /* Frontend + encoder + adapter over the window at feature frame `start`; finalizes rows into e->mem. */
 static int process_window(hes_ms* e, int start, int produced, int flush, int peek) {
   double t0 = now_ms();
@@ -299,26 +352,49 @@ static int process_window(hes_ms* e, int start, int produced, int flush, int pee
    * it reads "Fail again, fail better."). So the window at frame 0 feeds the audio from sample 0 and takes the first
    * 64 output frames: the graph's internal zero padding is then exactly the reference start. */
   int lc = start == 0 ? 0 : FE_LC;
-  int s0 = (start - lc) * SPF;
-  for (int i = 0; i < FE_IN; ++i) {
-    int si = s0 + i;
-    e->fein[i] = (si >= 0 && si < e->npcm) ? e->pcm[si] : 0.0f;
+  const float* encsrc;
+  int rc = 0;
+  if (e->fes.session) {
+    /* Features up to the fed audio exist already; only the part of the window past them (a peek's or the flush's
+     * zero-padded tail) is computed here, and only as far as a frame can still see audio: the rest is padding, whose
+     * feature is a constant (from the warm-up). The window at frame 0 keeps the graph throughout: there the
+     * zero-padded start is the model's own and FE_RF does not describe it. */
+    fe_advance(e, produced);
+    int need = start == 0 ? start + CHUNK : produced + FE_RF;
+    if (need > start + CHUNK) need = start + CHUNK;
+    int s = e->fe_done;
+    while (s < need) {
+      int n = fe_chunk(e, s);
+      if (n <= 0) return -1;
+      s += n;
+    }
+    for (int f = s > need ? need : s; f < start + CHUNK; ++f)
+      memcpy(e->feat + (size_t)f * e->enc_dim, e->fe_silence, (size_t)e->enc_dim * sizeof(float));
+    if (produced > e->fe_done) e->fe_done = produced < s ? produced : s;
+    encsrc = e->feat + (size_t)start * e->enc_dim;
+  } else {
+    int s0 = (start - lc) * SPF;
+    for (int i = 0; i < FE_IN; ++i) {
+      int si = s0 + i;
+      e->fein[i] = (si >= 0 && si < e->npcm) ? e->pcm[si] : 0.0f;
+    }
+    iree_hal_buffer_view_t* fev = mkview(e, &e->fe, (iree_hal_dim_t[]){1, FE_IN}, 2, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+                                         e->fein, FE_IN * sizeof(float));
+    if (!fev) return -1;
+    iree_hal_buffer_view_t* feo = run1(e, &e->fe, FN_FE, fev);
+    iree_hal_buffer_view_release(fev);
+    if (!feo) return -1;
+    size_t feats_bytes = (size_t)FE_OUT * e->enc_dim * sizeof(float);
+    rc = pull(e, &e->fe, feo, e->feats, feats_bytes);
+    iree_hal_buffer_view_release(feo);
+    if (rc) return -1;
+    encsrc = e->feats + (size_t)lc * e->enc_dim;
   }
-  iree_hal_buffer_view_t* fev = mkview(e, &e->fe, (iree_hal_dim_t[]){1, FE_IN}, 2, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-                                       e->fein, FE_IN * sizeof(float));
-  if (!fev) return -1;
-  iree_hal_buffer_view_t* feo = run1(e, &e->fe, FN_FE, fev);
-  iree_hal_buffer_view_release(fev);
-  if (!feo) return -1;
-  size_t feats_bytes = (size_t)FE_OUT * e->enc_dim * sizeof(float);
-  int rc = pull(e, &e->fe, feo, e->feats, feats_bytes);
-  iree_hal_buffer_view_release(feo);
-  if (rc) return -1;
   double t1 = now_ms();
 
   /* encoder on the clean 64 frames (drop the FE_LC context rows) */
   iree_hal_buffer_view_t* encin = mkview(e, &e->enc, (iree_hal_dim_t[]){1, CHUNK, (iree_hal_dim_t)e->enc_dim}, 3,
-                                         IREE_HAL_ELEMENT_TYPE_FLOAT_32, e->feats + (size_t)lc * e->enc_dim,
+                                         IREE_HAL_ELEMENT_TYPE_FLOAT_32, encsrc,
                                          (size_t)CHUNK * e->enc_dim * sizeof(float));
   iree_hal_buffer_view_t* enco = encin ? run1(e, &e->enc, FN_ENC, encin) : NULL;
   if (encin) iree_hal_buffer_view_release(encin);
@@ -572,7 +648,7 @@ static int run_steps(hes_ms* e, int budget, int trim) {
 }
 
 static void reset_utterance(hes_ms* e) {
-  e->npcm = 0; e->win = 0; e->nmem = 0;
+  e->npcm = 0; e->win = 0; e->nmem = 0; e->fe_done = 0; e->fe_feed_ms = 0.0; e->fe_calls = 0;
   e->peeked = 0; e->pending = 0; e->halted = 0; e->shown_len = 0;
   e->t_first_feed = 0.0; e->dropped = 0; e->windows = 0; e->hops = 0; e->nevt = 0; e->errors = 0;
   e->prefill_ms = e->step_ms = 0.0; e->prefills = e->steps = 0;
@@ -586,6 +662,9 @@ static int warmup(hes_ms* e) {
   double t0 = now_ms();
   e->npcm = 0;
   int rc = process_window(e, 0, CHUNK, 1, 0);
+  /* the padding feature: a chunk at s >= FE_LC over zeros, any kept frame */
+  if (rc == 0 && e->fes.session) rc = fe_chunk(e, FE_LC) > 0 ? 0 : -1;
+  if (rc == 0 && e->fes.session) memcpy(e->fe_silence, e->feat + (size_t)FE_LC * e->enc_dim, (size_t)e->enc_dim * sizeof(float));
   if (rc == 0) {
     memset(e->mem, 0, (size_t)MAXMEM * e->dim * sizeof(float));
     e->nmem = CHUNK;
@@ -604,11 +683,12 @@ void hes_ms_release(hes_ms* e) {
   if (!e) return;
   reset_utterance(e);
   hes__close_session(&e->fe); hes__close_session(&e->enc); hes__close_session(&e->adp);
-  hes__close_session(&e->pre); hes__close_session(&e->step);
+  hes__close_session(&e->pre); hes__close_session(&e->step); hes__close_session(&e->fes);
   vocab_free(&e->vocab);
   if (e->embed_map) munmap(e->embed_map, e->embed_len);
   free(e->rope_c); free(e->rope_s);
   free(e->fein); free(e->feats); free(e->mem64); free(e->mem256); free(e->mask); free(e->kvwin); free(e->kvc);
+  free(e->fesin); free(e->fesout); free(e->fe_silence); free(e->feat);
   free(e->row); free(e->xfer);
   free(e->pcm); free(e->mem);
   free(e);
@@ -664,8 +744,16 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
   }
   e->enc_dim = spec && spec->enc_dim > 0 ? spec->enc_dim : e->dim;
 
-  if (open_stage(e, &e->fe, dev_frontend, vmfb_frontend, NULL) ||
-      open_stage(e, &e->enc, dev_encoder, vmfb_encoder, NULL) ||
+  {  /* the incremental frontend, by convention next to frontend.vmfb, on the frontend's device; with it the
+      * whole-window frontend is never called, so it is not loaded */
+    const char* slash = strrchr(vmfb_frontend, '/');
+    char fesp[1024];
+    snprintf(fesp, sizeof fesp, "%.*sfrontend_step.vmfb", slash ? (int)(slash - vmfb_frontend + 1) : 0, vmfb_frontend);
+    if (access(fesp, R_OK) == 0 ? open_stage(e, &e->fes, dev_frontend, fesp, NULL)
+                                : open_stage(e, &e->fe, dev_frontend, vmfb_frontend, NULL))
+      goto fail;
+  }
+  if (open_stage(e, &e->enc, dev_encoder, vmfb_encoder, NULL) ||
       open_stage(e, &e->adp, dev_adapter, vmfb_adapter, NULL) ||
       open_stage(e, &e->pre, dev_decoder, vmfb_prefill, irpa) ||
       open_stage(e, &e->step, dev_decoder, vmfb_step, irpa))
@@ -687,6 +775,13 @@ hes_ms* hes_ms_create(hes_runtime* rt, const hes_ms_spec* spec,
   e->mem = calloc((size_t)MAXMEM * e->dim, sizeof(float));
   e->kvwin = malloc((size_t)CHUNK * 2 * e->nl * e->dim * sizeof(float));        /* CHUNK x 2 x layers x dim */
   e->kvc = calloc((size_t)2 * e->nl * MAXMEM * e->dim, sizeof(float));          /* 2 x layers x heads x MAXMEM x hd */
+  if (e->fes.session) {
+    e->fesin = malloc(FES_IN * sizeof(float));
+    e->fesout = malloc((size_t)FES_OUT * e->enc_dim * sizeof(float));
+    e->fe_silence = calloc((size_t)e->enc_dim, sizeof(float));
+    e->feat = malloc((size_t)MAXF * e->enc_dim * sizeof(float));
+    if (!e->fesin || !e->fesout || !e->fe_silence || !e->feat) { hes__set_error("moonshine: out of memory"); goto fail; }
+  }
   if (!e->rope_c || !e->rope_s || !e->fein || !e->feats || !e->mem64 || !e->mem256 || !e->mask || !e->row || !e->pcm || !e->mem ||
       !e->kvwin || !e->kvc) {
     hes__set_error("moonshine: out of memory");
@@ -709,6 +804,7 @@ const char* hes_ms_feed(hes_ms* e, const float* pcm, int32_t n) {
 
   int produced = e->npcm / SPF;
   int changed = 0;
+  fe_advance(e, produced);
   /* Behind the microphone by more than the lag budget: give up only the optional partial decodes; the windows still
    * run, so the final is unaffected (fast_finish keeps the incremental result, so there every hop counts). */
   if (e->t_first_feed == 0.0) e->t_first_feed = now_ms();
@@ -804,18 +900,20 @@ const char* hes_ms_finish(hes_ms* e) {
     const char* p = e->text;
     while (*p == ' ') ++p;
     snprintf(e->out, sizeof e->out, "%s", p);
-    tlog(e, "finish %.0fms (flush %.0fms decode %.0fms) nmem %d toks %d/%d dropped %d \"%s\"\n", now_ms() - t0,
-         t_flush - t0, now_ms() - t_flush, e->nmem, e->ntoks, finish_budget(e->npcm), e->dropped, e->out);
+    tlog(e, "finish %.0fms (flush %.0fms decode %.0fms) nmem %d toks %d/%d dropped %d festep %d/%.0fms \"%s\"\n",
+         now_ms() - t0, t_flush - t0, now_ms() - t_flush, e->nmem, e->ntoks, finish_budget(e->npcm), e->dropped,
+         e->fe_calls, e->fe_feed_ms, e->out);
   }
   int errors = e->errors;
   int n = snprintf(e->stats, sizeof e->stats,
                    "flushMs=%.0f,decodeMs=%.0f,finishMs=%.0f,finishAtMs=%.0f,lagMs=%.0f,droppedDecodes=%d,"
                    "windows=%d,hops=%d,memFrames=%d,tokens=%d,tokenBudget=%d,audioMs=%.0f,fastFinish=%d,lagBudgetMs=%d,"
-                   "errors=%d,prefills=%d,prefillMs=%.0f,steps=%d,stepMs=%.0f",
+                   "errors=%d,prefills=%d,prefillMs=%.0f,steps=%d,stepMs=%.0f,feStepCalls=%d,feStepMs=%.0f",
                    t_flush - t0, now_ms() - t_flush, now_ms() - t0, e->t_first_feed > 0.0 ? t0 - e->t_first_feed : 0.0,
                    e->t_first_feed > 0.0 ? t0 - e->t_first_feed - (double)e->npcm * 1000.0 / 16000.0 : 0.0, e->dropped,
                    e->windows, e->hops, e->nmem, e->ntoks, finish_budget(e->npcm), (double)e->npcm * 1000.0 / 16000.0,
-                   e->fast_finish, e->lag_budget_ms, errors, e->prefills, e->prefill_ms, e->steps, e->step_ms);
+                   e->fast_finish, e->lag_budget_ms, errors, e->prefills, e->prefill_ms, e->steps, e->step_ms,
+                   e->fe_calls, e->fe_feed_ms);
   /* timeline=<kind>:<atMs>:<a>:<b>:<c>|... (w window: frontend/encoder/adapter, p peek, h hop, d dropped hop) */
   if (e->nevt > 0 && n > 0 && (size_t)n < sizeof e->stats) {
     n += snprintf(e->stats + n, sizeof e->stats - n, ",timeline=");

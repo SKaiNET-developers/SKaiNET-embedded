@@ -16,6 +16,18 @@ BP="${BLUEPRINTS_DIR:-$HERE/../../SKaiNET-cartridge-blueprints}/blueprints/asr-m
 M="$DEST/artifacts/model/$LANG_"; W="$DEST/artifacts/weights/$LANG_"; T="$DEST/artifacts/tokenizer/$LANG_"
 mkdir -p "$M" "$W" "$T"
 for g in frontend encoder adapter prefill step; do cp "$BP/compile/$TARGET/$LANG_/$g.vmfb" "$M/"; done
+# the incremental frontend, when the target places it (params.npu_graphs or data_tiling; the runtime finds it next to
+# frontend.vmfb and runs it on the frontend's device, so it must be compiled for that device)
+rm -f "$M/frontend_step.vmfb"
+if python3 -I -c '
+import json, sys
+t = next(t for t in json.load(open(sys.argv[1]))["targets"] if t["id"] == sys.argv[2])
+p = t.get("params", {})
+listed = lambda k: {g.strip() for g in p.get(k, "").split(",")}
+sys.exit(0 if any("frontend_step" in listed(k) and "frontend" in listed(k) for k in ("npu_graphs", "data_tiling")) else 1)
+' "$BP/../../../blueprint.json" "$TARGET"; then
+  cp "$BP/compile/$TARGET/$LANG_/frontend_step.vmfb" "$M/"
+fi
 # dec_embed.bin, plus params.irpa when the target's decoder graphs read it (not with int8 decoder graphs)
 rm -f "$W"/*; cp "$BP/weights/$LANG_"/* "$W/"
 cp "$BP/export/$LANG_/vocab.bin" "$T/"
