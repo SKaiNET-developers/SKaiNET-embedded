@@ -34,10 +34,12 @@ private const val USAGE = """hes-tui — HomeEvenSmarter in the terminal
   --wav <file>     replay a 16 kHz 16-bit mono WAV instead of the microphone (each talk replays it)
   --server <url>   cartridge server (persisted in settings.properties)
   --home <dir>     settings and cartridges (default: ~/.homeevensmarter)
-  --load           load the installed cartridges into the real engines at start (as the `l` key does)
+  --asr <id>       the speech-recognition variant to use (persisted; Tab → ↑↓ → enter picks one in the UI)
+  --nlu <id>       the language-model variant to use (persisted)
+  --load           load the chosen cartridges into the real engines at start (as the `l` key does)
 """
 
-private class Options(val mic: String?, val noMic: Boolean, val wav: String?, val server: String?, val home: String?, val load: Boolean) {
+private class Options(val mic: String?, val noMic: Boolean, val wav: String?, val server: String?, val home: String?, val load: Boolean, val asr: String?, val nlu: String?) {
     companion object {
         fun parse(args: Array<String>): Options {
             val values = mutableMapOf<String, String>()
@@ -46,13 +48,13 @@ private class Options(val mic: String?, val noMic: Boolean, val wav: String?, va
             while (i < args.size) {
                 when (val a = args[i]) {
                     "--no-mic", "--load" -> flags += a
-                    "--mic", "--wav", "--server", "--home" -> { values[a] = args.getOrNull(i + 1) ?: usage("$a needs a value"); i++ }
+                    "--mic", "--wav", "--server", "--home", "--asr", "--nlu" -> { values[a] = args.getOrNull(i + 1) ?: usage("$a needs a value"); i++ }
                     "-h", "--help" -> usage(null)
                     else -> usage("unknown option $a")
                 }
                 i++
             }
-            return Options(values["--mic"], "--no-mic" in flags, values["--wav"], values["--server"], values["--home"], "--load" in flags)
+            return Options(values["--mic"], "--no-mic" in flags, values["--wav"], values["--server"], values["--home"], "--load" in flags, values["--asr"], values["--nlu"])
         }
 
         private fun usage(problem: String?): Nothing {
@@ -71,6 +73,8 @@ fun main(args: Array<String>) {
     SystemFileSystem.createDirectories(cartridges)
     val settings = FileSettings(Path(home, "settings.properties"))
     opts.server?.let { settings.serverUrl = it }
+    opts.asr?.let { settings.asrCartridge = it }
+    opts.nlu?.let { settings.nluCartridge = it }
     LinuxEngineFactory.cacheDir = Path(home, "cache")  // the NLU's tokenized catalog prefix survives restarts
 
     val audio: AudioSource? = when {

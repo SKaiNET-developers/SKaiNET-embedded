@@ -31,4 +31,12 @@ class FileSettings(private val file: Path) : AppEnvironment.Settings {
     override var devicePreference: String
         get() = props["device"] ?: "AUTO"
         set(value) { props["device"] = value; save() }
+
+    override var asrCartridge: String
+        get() = props["asr"] ?: ""
+        set(value) { props["asr"] = value; save() }
+
+    override var nluCartridge: String
+        get() = props["nlu"] ?: ""
+        set(value) { props["nlu"] = value; save() }
 }
