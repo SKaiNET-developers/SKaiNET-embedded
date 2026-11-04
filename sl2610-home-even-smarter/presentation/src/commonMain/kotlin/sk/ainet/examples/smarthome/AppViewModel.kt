@@ -19,6 +19,8 @@ import sk.ainet.examples.smarthome.cartridges.CartridgeDownloader
 import sk.ainet.examples.smarthome.cartridges.DevicePreference
 import sk.ainet.examples.smarthome.cartridges.DownloadEvent
 import sk.ainet.examples.smarthome.cartridges.InstalledCartridge
+import sk.ainet.examples.smarthome.cartridges.PackDevices
+import sk.ainet.examples.smarthome.cartridge.CartridgeKinds
 import sk.ainet.examples.smarthome.engine.AsrEngine
 import sk.ainet.examples.smarthome.engine.EngineStatus
 import sk.ainet.examples.smarthome.engine.NluEngine
@@ -44,6 +46,9 @@ data class EnginesState(
     val device: DevicePreference = DevicePreference.AUTO,
     val asrId: String? = null,
     val nluId: String? = null,
+    /** The variant chosen per task (persisted; "" = the first installed one). */
+    val asrChoice: String = "",
+    val nluChoice: String = "",
 ) {
     val ready: Boolean get() = asr is EngineStatus.Ready && nlu is EngineStatus.Ready
 }
@@ -54,7 +59,45 @@ data class CartridgesState(
     val indexError: String? = null,
     val downloads: Map<String, DownloadEvent> = emptyMap(),
     val verification: Map<String, String> = emptyMap(),
-)
+) {
+    /** Every variant the app knows of, installed or only on the server, ASR first, then by id. */
+    fun variants(): List<Variant> {
+        val entries = index?.cartridges.orEmpty().associateBy { it.id }
+        val local = installed.associateBy { it.id }
+        return (entries.keys + local.keys).map { id ->
+            val i = local[id]; val e = entries[id]
+            Variant(
+                id = id,
+                task = i?.task ?: e!!.task,
+                installed = i,
+                entry = e,
+                devices = i?.let { PackDevices.of(it.descriptor).declared } ?: e!!.devices,
+                sizeBytes = i?.sizeBytes ?: e!!.sizeBytes,
+            )
+        }.sortedWith(compareBy({ if (it.task == CartridgeKinds.TASK_ASR) 0 else 1 }, { it.id }))
+    }
+}
+
+/** One cartridge variant: installed, on the server, or both. */
+data class Variant(
+    val id: String,
+    val task: String,
+    val installed: InstalledCartridge?,
+    val entry: CartridgeIndex.Entry?,
+    val devices: Map<String, String>,
+    val sizeBytes: Long,
+) {
+    /** Where the graphs run, e.g. "encoder on NPU" or "all CPU". */
+    val placement: String get() = placementOf(devices)
+}
+
+/** "encoder on NPU", "all CPU": the graphs a pack places off the CPU. */
+fun placementOf(devices: Map<String, String>): String {
+    val off = devices.filterValues { it != PackDevices.CPU }
+    return if (off.isEmpty()) "all CPU" else off.entries.joinToString(", ") { (graph, device) ->
+        "$graph on " + when (device) { "torq" -> "NPU"; PackDevices.GPU -> "GPU"; else -> device }
+    }
+}
 
 /** One stage's status for the chips. */
 enum class StageStatus { PENDING, ACTIVE, DONE, FAILED, SKIPPED }
@@ -90,7 +133,12 @@ class AppViewModel(val env: AppEnvironment, private val scope: CoroutineScope) {
     val homeStore = HomeStore()
     val homeState: StateFlow<HomeState> get() = homeStore.state
 
-    private val _engines = MutableStateFlow(EnginesState(fakes = env.startWithFakes, device = runCatching { DevicePreference.valueOf(env.settings.devicePreference) }.getOrDefault(DevicePreference.AUTO)))
+    private val _engines = MutableStateFlow(EnginesState(
+        fakes = env.startWithFakes,
+        device = runCatching { DevicePreference.valueOf(env.settings.devicePreference) }.getOrDefault(DevicePreference.AUTO),
+        asrChoice = env.settings.asrCartridge,
+        nluChoice = env.settings.nluCartridge,
+    ))
     val engines: StateFlow<EnginesState> = _engines.asStateFlow()
 
     private val _cartridges = MutableStateFlow(CartridgesState())
@@ -149,31 +197,79 @@ class AppViewModel(val env: AppEnvironment, private val scope: CoroutineScope) {
         _engines.update { it.copy(device = pref) }
     }
 
-    /** Loads the installed cartridges into real engines and warms them up. Long: tens of seconds for the NLU. */
-    fun loadAndWarmUp() {
+    /** Loads the chosen cartridges into real engines and warms them up. Long: tens of seconds for the NLU. */
+    fun loadAndWarmUp() = load(keepLoaded = false)
+
+    /**
+     * Chooses the variant [id] for its task. Installed: it becomes the engine (when real engines are on, only that
+     * engine reloads; the other keeps running). Only on the server: it is downloaded first, then chosen.
+     */
+    fun use(variant: Variant) {
+        if (variant.installed == null) {
+            val entry = variant.entry ?: return
+            log("downloading ${variant.id} to use it")
+            download(entry) {
+                env.store.byId(variant.id)?.let { use(variant.copy(installed = it)) } ?: log("${variant.id}: downloaded but not readable")
+            }
+            return
+        }
+        when (variant.task) {
+            CartridgeKinds.TASK_ASR -> { env.settings.asrCartridge = variant.id; _engines.update { it.copy(asrChoice = variant.id) } }
+            CartridgeKinds.TASK_NLU -> { env.settings.nluCartridge = variant.id; _engines.update { it.copy(nluChoice = variant.id) } }
+            else -> return
+        }
+        val e = _engines.value
+        when {
+            e.fakes -> log("chose ${variant.id} (${variant.placement}); press l to load")
+            e.asr is EngineStatus.Loading || e.nlu is EngineStatus.Loading -> log("chose ${variant.id}; applies after the current load (press l)")
+            else -> { log("switching to ${variant.id} (${variant.placement})"); load(keepLoaded = true) }
+        }
+    }
+
+    /**
+     * Loads the chosen ASR and NLU cartridges. With [keepLoaded], an engine that is already loaded from the chosen
+     * cartridge stays as it is, so switching the ASR variant does not repeat the NLU's warm-up.
+     */
+    private fun load(keepLoaded: Boolean) {
         if (!env.engineFactory.available) { log("no runtime on ${env.platform}; staying on fakes"); return }
-        val asrPack = env.store.asr(); val nluPack = env.store.nlu()
+        val s0 = _engines.value
+        val asrPack = env.store.asr(s0.asrChoice.ifEmpty { null }); val nluPack = env.store.nlu(s0.nluChoice.ifEmpty { null })
         if (asrPack == null || nluPack == null) { log("cartridges missing: asr=${asrPack?.id} nlu=${nluPack?.id}"); return }
-        closeEngines()
-        _engines.update { it.copy(fakes = false, asr = EngineStatus.Loading("opening", 0), nlu = EngineStatus.Loading("waiting", 0), asrId = asrPack.id, nluId = nluPack.id) }
+        val keepAsr = keepLoaded && !s0.fakes && asr != null && s0.asr is EngineStatus.Ready && s0.asrId == asrPack.id
+        val keepNlu = keepLoaded && !s0.fakes && nlu != null && s0.nlu is EngineStatus.Ready && s0.nluId == nluPack.id
+        if (keepAsr && keepNlu) { log("already loaded: ${asrPack.id}, ${nluPack.id}"); return }
+        stopListening()
+        pipelineJob?.cancel(); pipelineJob = null; pipeline = null
+        if (!keepAsr) { runCatching { asr?.close() }; asr = null }
+        if (!keepNlu) { runCatching { nlu?.close() }; nlu = null }
+        _engines.update {
+            it.copy(fakes = false, asrId = asrPack.id, nluId = nluPack.id,
+                asr = if (keepAsr) it.asr else EngineStatus.Loading("opening", 0),
+                nlu = if (keepNlu) it.nlu else EngineStatus.Loading("waiting", 0))
+        }
         scope.launch(Dispatchers.Default) {
             val device = _engines.value.device
             val t0 = started.elapsedNow().inWholeMilliseconds
             val ticker = launch { while (true) { delay(250); val e = started.elapsedNow().inWholeMilliseconds - t0; _engines.update { s -> s.copy(asr = (s.asr as? EngineStatus.Loading)?.copy(elapsedMs = e) ?: s.asr, nlu = (s.nlu as? EngineStatus.Loading)?.copy(elapsedMs = e) ?: s.nlu) } } }
             try {
-                val a = env.engineFactory.asr(asrPack, "en", device)
-                a.open() // loads the five graphs
-                asr = a
-                val asrMs = started.elapsedNow().inWholeMilliseconds - t0
-                _engines.update { it.copy(asr = EngineStatus.Ready(asrMs, "${asrPack.descriptor.target.accelerator ?: "cpu"}"), nlu = EngineStatus.Loading("warm-up: catalog prefill", asrMs)) }
-                log("asr ready in $asrMs ms (${asrPack.id})")
-                val t1 = started.elapsedNow().inWholeMilliseconds
-                val n = env.engineFactory.nlu(nluPack, device)
-                n.warmUp()
-                nlu = n
-                val nluMs = started.elapsedNow().inWholeMilliseconds - t1
-                _engines.update { it.copy(nlu = EngineStatus.Ready(nluMs, "${nluPack.descriptor.target.accelerator ?: "cpu"}")) }
-                log("nlu ready in $nluMs ms (${nluPack.id})")
+                if (!keepAsr) {
+                    val a = env.engineFactory.asr(asrPack, "en", device)
+                    a.open() // loads the five graphs
+                    asr = a
+                    val asrMs = started.elapsedNow().inWholeMilliseconds - t0
+                    _engines.update { it.copy(asr = EngineStatus.Ready(asrMs, placementOf(PackDevices.of(asrPack.descriptor).declared)),
+                        nlu = if (keepNlu) it.nlu else EngineStatus.Loading("warm-up: catalog prefill", asrMs)) }
+                    log("asr ready in $asrMs ms (${asrPack.id})")
+                }
+                if (!keepNlu) {
+                    val t1 = started.elapsedNow().inWholeMilliseconds
+                    val n = env.engineFactory.nlu(nluPack, device)
+                    n.warmUp()
+                    nlu = n
+                    val nluMs = started.elapsedNow().inWholeMilliseconds - t1
+                    _engines.update { it.copy(nlu = EngineStatus.Ready(nluMs, "${nluPack.descriptor.target.accelerator ?: "cpu"}")) }
+                    log("nlu ready in $nluMs ms (${nluPack.id})")
+                }
                 rebuildPipeline()
             } catch (e: Throwable) {
                 val reason = e.message ?: e::class.simpleName ?: "failed"
@@ -317,11 +413,17 @@ class AppViewModel(val env: AppEnvironment, private val scope: CoroutineScope) {
         }
     }
 
-    fun download(entry: CartridgeIndex.Entry) {
+    /** Downloads [entry] (resumable, digest-checked), then runs [then] once it is installed. */
+    fun download(entry: CartridgeIndex.Entry, then: (() -> Unit)? = null) {
+        if (_cartridges.value.downloads[entry.id].let { it is DownloadEvent.Progress || it is DownloadEvent.Verifying }) return
         scope.launch(Dispatchers.Default) {
             downloader.download(_serverUrl.value, entry).collect { ev ->
                 _cartridges.update { it.copy(downloads = it.downloads + (entry.id to ev)) }
-                if (ev is DownloadEvent.Done) { log("downloaded ${entry.id} (${ev.bytes / 1_000_000} MB)"); refreshCartridges() }
+                if (ev is DownloadEvent.Done) {
+                    log("downloaded ${entry.id} (${ev.bytes / 1_000_000} MB)")
+                    _cartridges.update { it.copy(installed = env.store.installed()) }
+                    then?.invoke()
+                }
                 if (ev is DownloadEvent.Failed) log("download failed ${entry.id}: ${ev.reason}")
             }
         }
@@ -338,7 +440,13 @@ class AppViewModel(val env: AppEnvironment, private val scope: CoroutineScope) {
     }
 
     fun delete(cartridge: InstalledCartridge) {
-        scope.launch(Dispatchers.Default) { env.store.delete(cartridge.id); refreshCartridges(); log("deleted ${cartridge.id}") }
+        val e = _engines.value
+        if (!e.fakes && (cartridge.id == e.asrId || cartridge.id == e.nluId)) { log("${cartridge.id} is loaded; choose another variant first"); return }
+        scope.launch(Dispatchers.Default) {
+            env.store.delete(cartridge.id)
+            _cartridges.update { it.copy(installed = env.store.installed(), downloads = it.downloads - cartridge.id, verification = it.verification - cartridge.id) }
+            log("deleted ${cartridge.id}")
+        }
     }
 
     private fun log(line: String) {

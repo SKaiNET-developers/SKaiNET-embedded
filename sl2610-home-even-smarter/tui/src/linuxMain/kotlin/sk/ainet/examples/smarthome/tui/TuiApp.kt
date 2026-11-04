@@ -21,6 +21,8 @@ import sk.ainet.examples.smarthome.CartridgesState
 import sk.ainet.examples.smarthome.EnginesState
 import sk.ainet.examples.smarthome.RunView
 import sk.ainet.examples.smarthome.StageStatus
+import sk.ainet.examples.smarthome.Variant
+import sk.ainet.examples.smarthome.cartridge.CartridgeKinds
 import sk.ainet.examples.smarthome.cartridges.DownloadEvent
 import sk.ainet.examples.smarthome.engine.EngineStatus
 import sk.ainet.examples.smarthome.engine.NluOutcome
@@ -56,7 +58,10 @@ fun TuiApp(vm: AppViewModel, micLabel: String, onQuit: () -> Unit) {
     val server by vm.serverUrl.collectAsState()
     var screen by remember { mutableStateOf(Screen.HOME) }
     var typing by remember { mutableStateOf<String?>(null) }
+    var cursor by remember { mutableStateOf(0) }
     val rows = LocalTerminalState.current.size.rows
+    val variants = cartridges.variants()
+    val selected = variants.getOrNull(cursor.coerceIn(0, (variants.size - 1).coerceAtLeast(0)))
 
     fun onKey(e: KeyEvent): Boolean {
         val input = typing
@@ -70,6 +75,24 @@ fun TuiApp(vm: AppViewModel, micLabel: String, onQuit: () -> Unit) {
             }
             return true
         }
+        if (screen == Screen.CARTRIDGES) {
+            when (e.key) {
+                "ArrowUp", "k" -> cursor = (cursor - 1).coerceAtLeast(0)
+                "ArrowDown", "j" -> cursor = (cursor + 1).coerceAtMost((variants.size - 1).coerceAtLeast(0))
+                "Enter", "u" -> selected?.let(vm::use)
+                "d" -> selected?.entry?.let { vm.download(it) }
+                "D" -> cartridges.index?.cartridges?.forEach { vm.download(it) }
+                "v" -> selected?.installed?.let(vm::verify)
+                "x" -> selected?.installed?.let(vm::delete)
+                "i" -> vm.fetchIndex()
+                "l" -> vm.loadAndWarmUp()
+                "f" -> vm.useFakes(!engines.fakes)
+                "Tab" -> screen = Screen.HOME
+                "q" -> onQuit()
+                else -> return false
+            }
+            return true
+        }
         when (e.key) {
             " " -> if (pipelineState == PipelineState.LISTENING) vm.stopListening() else if (vm.canTalk) vm.startListening()
             "t", ":" -> typing = ""
@@ -77,10 +100,7 @@ fun TuiApp(vm: AppViewModel, micLabel: String, onQuit: () -> Unit) {
             "r" -> vm.resetHome()
             "f" -> vm.useFakes(!engines.fakes)
             "l" -> vm.loadAndWarmUp()
-            "i" -> vm.fetchIndex()
-            "d" -> cartridges.index?.cartridges?.forEach(vm::download)
-            "v" -> cartridges.installed.forEach(vm::verify)
-            "Tab" -> screen = if (screen == Screen.HOME) Screen.CARTRIDGES else Screen.HOME
+            "Tab" -> { screen = Screen.CARTRIDGES; if (cartridges.index == null) vm.fetchIndex() }
             "q" -> onQuit()
             else -> return false
         }
@@ -99,9 +119,9 @@ fun TuiApp(vm: AppViewModel, micLabel: String, onQuit: () -> Unit) {
                         color = if (passed == golden.size) Ok else Warn)
                 }
             }
-            Screen.CARTRIDGES -> CartridgesPanel(cartridges, engines)
+            Screen.CARTRIDGES -> CartridgesPanel(cartridges, variants, selected, engines)
         }
-        val logRows = (rows - if (screen == Screen.HOME) 24 else 16).coerceIn(3, 12)
+        val logRows = (rows - if (screen == Screen.HOME) 24 else 12 + variants.size).coerceIn(3, 12)
         Line("─ log " + "─".repeat(40), color = Dim)
         log.takeLast(logRows).forEach { Line(it, color = Dim) }
         Footer(typing, screen)
@@ -114,7 +134,7 @@ private fun Header(engines: EnginesState, state: PipelineState, mic: String, ser
         Text("HomeEvenSmarter", color = Accent, textStyle = TextStyle.Bold)
         Text(" · $state · engines ${if (engines.fakes) "fakes" else "cartridges"} · device ${engines.device}")
     }
-    Line("asr ${engines.asr.short()} · nlu ${engines.nlu.short()}", color = Dim)
+    Line("asr ${engines.asrId ?: "–"} ${engines.asr.short()} · nlu ${engines.nluId ?: "–"} ${engines.nlu.short()}", color = Dim)
     Line("mic $mic · server $server", color = Dim)
 }
 
@@ -187,26 +207,29 @@ private fun PipelinePanel(run: RunView, state: PipelineState) {
     }
 }
 
+/**
+ * Every variant per task, installed or only on the server: ▸ marks the cursor, ● the one in use, ○ the one chosen
+ * for the next load. Choosing one that is not installed downloads it first.
+ */
 @Composable
-private fun CartridgesPanel(c: CartridgesState, engines: EnginesState) {
-    Line("─ cartridges " + "─".repeat(34), color = Dim)
+private fun CartridgesPanel(c: CartridgesState, variants: List<Variant>, selected: Variant?, engines: EnginesState) {
+    Line("─ cartridges · ${c.installed.size} installed · server ${c.index?.let { "${it.cartridges.size} listed" } ?: c.indexError ?: "not fetched (i)"} " + "─".repeat(8), color = Dim)
     Column(modifier = Modifier.padding(left = 1)) {
-        Text("installed", textStyle = TextStyle.Bold)
-        if (c.installed.isEmpty()) Text("  none", color = Dim)
-        c.installed.forEach { Line("  ${it.id}  ${it.sizeBytes / 1_000_000} MB  ${c.verification[it.id] ?: ""}") }
-        Text("server index", textStyle = TextStyle.Bold)
-        c.indexError?.let { Line("  $it", color = Bad) }
-        val index = c.index
-        if (index == null && c.indexError == null) Text("  not fetched (press i)", color = Dim)
-        index?.cartridges?.forEach { e ->
-            val dl = when (val d = c.downloads[e.id]) {
-                is DownloadEvent.Progress -> "${(d.fraction * 100).toInt()}% ${d.file}"
-                is DownloadEvent.Verifying -> "verifying ${d.file}"
-                is DownloadEvent.Done -> "done"
+        if (variants.isEmpty()) Text("  none installed, none listed (press i to fetch the server index)", color = Dim)
+        var task: String? = null
+        for (v in variants) {
+            if (v.task != task) { task = v.task; Text(if (v.task == CartridgeKinds.TASK_ASR) "speech → text" else "text → function call", textStyle = TextStyle.Bold) }
+            val inUse = !engines.fakes && (v.id == engines.asrId || v.id == engines.nluId)
+            val chosen = v.id == (if (v.task == CartridgeKinds.TASK_ASR) engines.asrChoice else engines.nluChoice)
+            val mark = (if (v == selected) "▸" else " ") + (if (inUse) "●" else if (chosen) "○" else " ")
+            val state = when (val d = c.downloads[v.id]) {
+                is DownloadEvent.Progress -> "${(d.fraction * 100).toInt()}% ${d.file.substringAfterLast('/')}"
+                is DownloadEvent.Verifying -> "verifying ${d.file.substringAfterLast('/')}"
                 is DownloadEvent.Failed -> "failed: ${d.reason}"
-                null -> ""
+                is DownloadEvent.Done, null -> c.verification[v.id] ?: if (v.installed != null) "installed" else "on server"
             }
-            Line("  ${e.id}  ${e.accelerator ?: "cpu"}  ${e.sizeBytes / 1_000_000} MB  $dl")
+            Line("$mark ${v.id.padEnd(46)} ${v.placement.padEnd(16)} ${(v.sizeBytes / 1_000_000).toString().padStart(5)} MB  $state",
+                color = when { inUse -> Ok; v == selected -> Accent; v.installed == null -> Dim; else -> Color.Unspecified })
         }
         Line("engines: asr ${engines.asr.short()} · nlu ${engines.nlu.short()}", color = Dim)
     }
@@ -220,7 +243,7 @@ private fun Footer(typing: String?, screen: Screen) {
     } else {
         val keys = when (screen) {
             Screen.HOME -> "space talk · t type · g golden set · r reset · f fakes · tab cartridges · q quit"
-            Screen.CARTRIDGES -> "i fetch index · d download · v verify · l load & warm up · tab home · q quit"
+            Screen.CARTRIDGES -> "↑↓ select · enter use (downloads if needed) · d download · D all · v verify · x delete · i index · l load · tab home"
         }
         Line(keys, color = Dim)
     }

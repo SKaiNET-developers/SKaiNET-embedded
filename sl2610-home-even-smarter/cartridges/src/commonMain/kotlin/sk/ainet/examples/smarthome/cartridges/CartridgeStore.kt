@@ -11,9 +11,12 @@ import sk.ainet.examples.smarthome.cartridge.CartridgeManifest
 import sk.ainet.examples.smarthome.cartridge.ManifestVerifier
 import sk.ainet.examples.smarthome.cartridge.Verification
 
-/** A materialized cartridge found on disk. */
+/**
+ * A materialized cartridge found on disk. Its [id] is its directory name — the server's index id, which the downloader
+ * writes to — so two variants of one blueprint (same `descriptor.id`) stay apart.
+ */
 data class InstalledCartridge(val dir: Path, val descriptor: CartridgeDescriptor, val manifest: CartridgeManifest) {
-    val id: String get() = descriptor.id
+    val id: String get() = dir.name
     val task: String get() = descriptor.task
     val sizeBytes: Long get() = manifest.totalBytes
     val usesAccelerator: Boolean get() = descriptor.usesAccelerator
@@ -42,8 +45,14 @@ class CartridgeStore(val root: Path) {
 
     fun byId(id: String): InstalledCartridge? = read(Path(root, id))
 
-    fun asr(): InstalledCartridge? = installed().firstOrNull { it.task == CartridgeKinds.TASK_ASR }
-    fun nlu(): InstalledCartridge? = installed().firstOrNull { it.task == CartridgeKinds.TASK_NLU }
+    /** The ASR cartridge to load: [preferred] when it is installed, otherwise the first one. */
+    fun asr(preferred: String? = null): InstalledCartridge? = ofTask(CartridgeKinds.TASK_ASR, preferred)
+    fun nlu(preferred: String? = null): InstalledCartridge? = ofTask(CartridgeKinds.TASK_NLU, preferred)
+
+    private fun ofTask(task: String, preferred: String?): InstalledCartridge? {
+        val all = installed().filter { it.task == task }
+        return all.firstOrNull { it.id == preferred } ?: all.firstOrNull()
+    }
 
     /**
      * Full digest check of every artifact against the manifest, streamed in 1 MB chunks (reads gigabytes for the NLU

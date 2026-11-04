@@ -55,6 +55,10 @@ data class CartridgeIndex(val cartridges: List<Entry>) {
         @SerialName("size_bytes") val sizeBytes: Long,
         /** Paths relative to the pack_dir, always including descriptor.json and manifest.json. */
         val files: List<File>,
+        /** Where each graph runs (`descriptor.attributes.devices`, IREE device names), so variants can be told apart. */
+        val devices: Map<String, String> = emptyMap(),
+        /** The pack's hardware line (`descriptor.target.hardware`). */
+        val hardware: String? = null,
     ) {
         @Serializable
         data class File(val path: String, @SerialName("size_bytes") val sizeBytes: Long, val sha256: String? = null)

@@ -63,10 +63,27 @@ ssh -t root@<board-ip> /home/root/hes-tui/hes-tui --mic plughw:1,0   # USB mic o
 ```
 
 Keys: `space` talk (press again or pause to stop; terminals report no key release), `t` type a command, `g` golden
-set, `r` reset the home, `f` fakes on/off, `tab` cartridges (`i` fetch index, `d` download, `v` verify,
-`l` load and warm up), `q` quit.
+set, `r` reset the home, `f` fakes on/off, `l` load and warm up, `tab` cartridges, `q` quit.
 
-Cartridges: `scripts/serve-cartridges.sh <dir>` on the host, then `hes-tui --server http://<host-ip>:8080`.
+### Variants: served by the host, downloaded on demand, switched in the TUI
+
+The host serves every variant the recipes build; the board downloads the one you pick and switches to it:
+```
+scripts/stage-variants.sh                          # ASR: torq-sl26xx (encoder on the NPU, TOSA route),
+                                                   #      sl26xx-cpu-int8 (all CPU, int8 × int8), cpu-sl26xx (all CPU,
+                                                   #      int8 weights); NLU: FunctionGemma on the CPU
+scripts/serve-cartridges.sh build/cartridges 8089  # the index and the files; prints the URL
+ssh -t root@<board-ip> /home/root/hes-tui/hes-tui --server http://<host-ip>:8089 --mic plughw:1,0
+```
+The host must accept connections on that port (e.g. `sudo ufw allow from <board-subnet> to any port 8089 proto tcp`),
+or tunnel it: `ssh -N -R 8089:127.0.0.1:8089 root@<board-ip>` and `--server http://127.0.0.1:8089`.
+
+`tab` opens the cartridges screen (the index is fetched on first open): every variant per task, installed or only on
+the server, with where its graphs run and its size. `↑`/`↓` select, `enter` uses it: an installed variant becomes the
+engine (with real engines on, only that engine reloads, so switching the ASR keeps the warmed-up NLU), one only on the
+server is downloaded first (resumable, every file checked against its SHA-256), then used. `d` downloads the selected
+one, `D` all, `v` verifies, `x` deletes (not the one loaded), `i` refetches the index. `●` marks the variant in use,
+`○` the one chosen for the next load. The choice is saved; `--asr <id>` / `--nlu <id>` set it from the command line.
 
 Board models come from the blueprints' `cpu-sl26xx` targets (compiled by `skainet/iree-compiler-torq`, profiles in
 `cartridges/profiles/`); the ASR's `torq-sl26xx` target runs its frontend and encoder on the NPU
@@ -78,7 +95,9 @@ final, latency after the last sample, per-window stage costs).
 
 Install packs into the app's store on the board with `scripts/install-dev-packs.sh` (sends only what changed), then
 `hes-tui --load` starts on the real engines (or press `l`). `hes-app-check [--verify] <file.wav>… [-- typed…]` runs the
-same AppViewModel headless: installed cartridges, real engines, WAVs replayed as the microphone. Each pack's
+same AppViewModel headless: installed cartridges, real engines, WAVs replayed as the microphone; with
+`--server <url> --asr <id> --nlu <id>` it downloads a chosen variant that is missing, and `--switch-asr <id>` switches
+the ASR the way the cartridges screen does and replays the WAVs again. Each pack's
 `descriptor.attributes.devices` places its graphs (`local-task` CPU, `torq` NPU, `vulkan` GPU; default CPU); the
 device preference overrides it.
 

@@ -20,11 +20,19 @@ class AppEnvironment(
     /** How long one NLU resolve may take before the pipeline gives up. A phone needs seconds; a 2×A55 board ~10–35 s. */
     val nluBudgetMs: Long = 15_000,
 ) {
-    /** Two persisted strings are all the app needs. */
+    /** A few persisted strings are all the app needs. */
     interface Settings {
         var serverUrl: String
         var devicePreference: String
+        /** The cartridge ids chosen per task ("" = the first installed one). */
+        var asrCartridge: String
+        var nluCartridge: String
     }
 
-    class MemorySettings(override var serverUrl: String = "http://192.168.1.10:8080", override var devicePreference: String = "AUTO") : Settings
+    class MemorySettings(
+        override var serverUrl: String = "http://192.168.1.10:8080",
+        override var devicePreference: String = "AUTO",
+        override var asrCartridge: String = "",
+        override var nluCartridge: String = "",
+    ) : Settings
 }

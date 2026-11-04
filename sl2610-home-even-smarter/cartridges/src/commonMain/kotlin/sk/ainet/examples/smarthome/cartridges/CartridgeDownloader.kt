@@ -8,7 +8,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.prepareGet
-import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteReadChannel
@@ -50,7 +50,8 @@ class CartridgeDownloader(
     suspend fun index(baseUrl: String): CartridgeIndex {
         val response = client.get(indexUrl(baseUrl))
         if (!response.status.isSuccess()) error("server answered ${response.status} for ${indexUrl(baseUrl)}")
-        return CartridgeJson.index(response.bodyAsText())
+        // bytes, decoded here: bodyAsText() goes through iconv on Kotlin/Native, and the board's libc has no UTF-8 converter
+        return CartridgeJson.index(response.bodyAsBytes().decodeToString())
     }
 
     /** Downloads [entry] from [baseUrl]; emits progress and ends with [DownloadEvent.Done] or [DownloadEvent.Failed]. */

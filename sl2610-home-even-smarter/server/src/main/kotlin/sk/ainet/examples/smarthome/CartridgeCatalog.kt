@@ -2,6 +2,8 @@ package sk.ainet.examples.smarthome
 
 import sk.ainet.examples.smarthome.cartridge.CartridgeIndex
 import sk.ainet.examples.smarthome.cartridge.CartridgeJson
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 /**
@@ -32,6 +34,8 @@ class CartridgeCatalog(val root: File) {
             languages = descriptor.languages,
             sizeBytes = files.sumOf { it.sizeBytes },
             files = files,
+            devices = (descriptor.attributes?.get("devices") as? JsonObject)?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap(),
+            hardware = descriptor.target.hardware.ifEmpty { null },
         )
     }
 }

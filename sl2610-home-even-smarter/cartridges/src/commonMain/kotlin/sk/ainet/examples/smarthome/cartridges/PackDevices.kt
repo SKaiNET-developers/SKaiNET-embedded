@@ -15,7 +15,7 @@ import sk.ainet.examples.smarthome.cartridge.CartridgeJson
  * CPU, `torq` = NPU, `vulkan` = GPU). A stage the pack does not name runs on the CPU. The user's [DevicePreference]
  * overrides the pack: CPU puts everything on the CPU, GPU everything on Vulkan.
  */
-class PackDevices(private val declared: Map<String, String>) {
+class PackDevices(val declared: Map<String, String>) {
     fun of(stage: String, preference: DevicePreference = DevicePreference.AUTO): String = when (preference) {
         DevicePreference.AUTO -> declared[stage] ?: CPU
         DevicePreference.CPU -> CPU
